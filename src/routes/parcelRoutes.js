@@ -1,12 +1,36 @@
 import express from 'express';
 import multer from 'multer';
-import { createParcel, estimateParcel } from '../controllers/parcelController.js';
-import uploadParcelPhoto from "../middlewares/uploadParcelPhoto.js";
+import path from 'path';
+import { estimateParcel, createParcel } from '../controllers/parcelController.js';
 
 const router = express.Router();
-const upload = multer({ dest: 'uploads/' });
 
+// ✅ Multer configuration
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/'); // Folder where images will be saved
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, `${Date.now()}-${file.fieldname}${ext}`); // Unique filename
+  },
+});
+
+// ✅ File filter (images only)
+const fileFilter = (req, file, cb) => {
+  if (file.mimetype.startsWith('image/')) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only image files are allowed!'), false);
+  }
+};
+
+const upload = multer({ storage, fileFilter });
+
+// ✅ Estimate parcel cost
 router.post('/estimate', estimateParcel);
-router.post("/create", uploadParcelPhoto.single("parcelPhoto"), createParcelRequest);// <- this must match!
+
+// ✅ Create parcel (with photo upload)
+router.post('/create', upload.single('parcelPhoto'), createParcel);
 
 export default router;
