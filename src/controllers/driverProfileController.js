@@ -1,7 +1,6 @@
 import cloudinary from "../utils/cloudinary.js";
 import User from "../models/User.js";
-
-
+import streamifier from "streamifier";
 
 /**
  * @desc    Upload driver's profile photo to Cloudinary and update user record
@@ -10,21 +9,34 @@ import User from "../models/User.js";
  */
 export const uploadDriverProfilePhoto = async (req, res) => {
   try {
-    const userId = req.user.id; // assuming you're using auth middleware that sets req.user
+    const phoneNumber = req.user.phone_number?.replace("+91", ""); // ✅ match DB format
+    console.log("req.user from Firebase:", req.user);
+
     const file = req.file;
 
     if (!file) {
       return res.status(400).json({ message: "No image file uploaded." });
     }
 
-    // Upload image to Cloudinary
-    const result = await cloudinary.uploader.upload(file.path, {
-      folder: "driver_profiles",
-    });
+    // Upload image buffer to Cloudinary
+    const streamUpload = (buffer) => {
+      return new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: "driver_profiles" },
+          (error, result) => {
+            if (result) resolve(result);
+            else reject(error);
+          }
+        );
+        streamifier.createReadStream(buffer).pipe(stream);
+      });
+    };
 
-    // Update user's profilePhotoUrl
-    const user = await User.findByIdAndUpdate(
-      userId,
+    const result = await streamUpload(file.buffer);
+
+    // ✅ Match user by phone number
+    const user = await User.findOneAndUpdate(
+      { phone: phoneNumber },
       { profilePhotoUrl: result.secure_url },
       { new: true }
     );

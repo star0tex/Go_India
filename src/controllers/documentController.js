@@ -18,6 +18,13 @@ export const uploadDriverDocument = async (req, res) => {
     const file = req.file;
     const { docType, vehicleType, extractedData } = req.body;
 
+     // 🔍 Add this block for debugging
+    console.log("docType:", docType);
+    console.log("vehicleType:", vehicleType);
+    console.log("extractedData:", extractedData);
+    console.log("file received:", file?.originalname || "No file");
+
+
     if (!file) {
       return res.status(400).json({ message: "No file uploaded." });
     }
@@ -30,6 +37,8 @@ export const uploadDriverDocument = async (req, res) => {
 
     // ✅ Validate docType against vehicleType
     const allowedDocs = requiredDocs[vehicleType];
+    console.log("allowedDocs for vehicleType:", vehicleType, "=>", allowedDocs);
+
     if (!allowedDocs || !allowedDocs.includes(docType)) {
       return res.status(400).json({
         message: `Document type '${docType}' is not required for vehicle type '${vehicleType}'.`,

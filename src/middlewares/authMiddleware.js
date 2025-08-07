@@ -18,8 +18,11 @@ export const protect = async (req, res, next) => {
 
     console.log("🔐 Token verified for:", decodedToken.phone_number);
 
-    req.user = decodedToken; // Firebase user info
-    next();
+ req.user = {
+      ...decodedToken,
+      id: decodedToken.uid, // ✅ Add this
+    };
+        next();
   } catch (error) {
     return res.status(401).json({
       message: "Token invalid or expired",

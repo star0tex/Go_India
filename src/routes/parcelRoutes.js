@@ -18,6 +18,8 @@ const storage = multer.diskStorage({
 
 // ✅ File filter (images only)
 const fileFilter = (req, file, cb) => {
+    console.log("📦 Received file type:", file.mimetype); // Add this
+
   if (file.mimetype.startsWith('image/')) {
     cb(null, true);
   } else {

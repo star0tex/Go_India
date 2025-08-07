@@ -20,16 +20,15 @@ export const initSocket = (httpServer) => {
     console.log(`🟢 New connection: ${socket.id}`);
 
     // Register driver
-    socket.on('driver:register', async ({ driverId }) => {
-      connectedDrivers.set(socket.id, driverId);
-      await User.findByIdAndUpdate(driverId, { socketId: socket.id, isOnline: true });
-      console.log(`🚗 Driver registered: ${driverId}`);
-    });
+    socket.on('updateDriverStatus', async ({ driverId, isOnline }) => {
+await User.findOneAndUpdate({ phone: driverId }, { socketId: socket.id, isOnline: true });
+  console.log(`📶 Driver ${driverId} is now ${isOnline ? 'online' : 'offline'}`);
+});
 
     // Register customer
     socket.on('customer:register', async ({ customerId }) => {
       connectedCustomers.set(socket.id, customerId);
-      await User.findByIdAndUpdate(customerId, { socketId: socket.id });
+await User.findOneAndUpdate({ phone: customerId }, { socketId: socket.id });
       console.log(`👤 Customer registered: ${customerId}`);
     });
 
@@ -55,6 +54,8 @@ export const initSocket = (httpServer) => {
       // Emit trip request to nearby drivers
       nearbyDrivers.forEach((driver) => {
         if (driver.socketId) {
+          console.log(`📤 Emitted trip to driver ${driver._id} socket ${driver.socketId}`);
+
           io.to(driver.socketId).emit('trip:request', {
             tripId: trip._id,
             pickup: trip.pickup,
@@ -73,11 +74,11 @@ export const initSocket = (httpServer) => {
       const trip = await Trip.findById(tripId);
       if (!trip || trip.status !== 'requested') return;
 
-      trip.driver = driverId;
-      trip.status = 'accepted';
+     trip.assignedDriver = driverId;
+trip.status = 'driver_assigned'; // match enum
       await trip.save();
 
-      const customer = await User.findById(trip.customer);
+const customer = await User.findById(trip.customerId);
       if (customer?.socketId) {
         io.to(customer.socketId).emit('trip:accepted', { tripId, driverId });
       }

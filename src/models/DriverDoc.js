@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 const driverDocSchema = new mongoose.Schema(
   {
     userId: {
-      type: mongoose.Schema.Types.ObjectId,
+  type: String, // ✅ Instead of ObjectId
       ref: "User",
       required: true,
     },

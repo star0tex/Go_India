@@ -13,6 +13,7 @@ const router = express.Router();
  * @middleware: multer.single("image")
  */
 router.post(
+  
   "/uploadProfilePhoto",
   protect,
   uploadProfilePhoto.single("image"), // ✅ use the configured profile photo multer
