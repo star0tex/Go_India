@@ -4,6 +4,7 @@ import User from '../models/User.js';
 import { sendToDriver, sendToCustomer } from '../utils/fcmSender.js';
 import { io } from '../socket/socketHandler.js';
 import { reassignStandbyDriver } from './standbyController.js';
+import mongoose from 'mongoose';
 
 const RADIUS = {
   SHORT: 3000,
@@ -12,9 +13,23 @@ const RADIUS = {
   LONG_ADVANCE: 50000,
 };
 
+// helper: accept either ObjectId string or phone string
+const findUserByIdOrPhone = async (idOrPhone) => {
+  if (!idOrPhone) return null;
+  if (typeof idOrPhone === 'string' && /^[0-9a-fA-F]{24}$/.test(idOrPhone)) {
+    const byId = await User.findById(idOrPhone);
+    if (byId) return byId;
+  }
+  // fallback to phone lookup
+  return await User.findOne({ phone: idOrPhone });
+};
+
 const createShortTrip = async (req, res) => {
   try {
     const { customerId, pickup, drop, vehicleType } = req.body;
+
+    const customer = await findUserByIdOrPhone(customerId);
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
 
     const nearbyDrivers = await User.find({
       isDriver: true,
@@ -29,7 +44,7 @@ const createShortTrip = async (req, res) => {
     });
 
     const trip = await Trip.create({
-customerId: customer._id, // ✅ correct and matches schema
+      customerId: customer._id,
       pickup,
       drop,
       vehicleType,
@@ -37,17 +52,28 @@ customerId: customer._id, // ✅ correct and matches schema
       status: 'requested',
     });
 
+    const payload = {
+      tripId: trip._id,
+      pickup,
+      drop,
+      vehicleType,
+    };
+
     nearbyDrivers.forEach((driver) => {
-      io.to(driver.socketId).emit('tripRequest', {
-        tripId: trip._id,
-        pickup,
-        drop,
-        vehicleType,
-      });
+      if (driver.socketId) {
+        // emit canonical event
+        io.to(driver.socketId).emit('trip:request', payload);
+        // keep backward-compatible legacy event
+        io.to(driver.socketId).emit('tripRequest', payload);
+      } else if (driver.fcmToken) {
+        // fallback FCM
+        sendToDriver(driver.fcmToken, 'New Ride Request', 'A ride is nearby. Open the app to accept.', payload);
+      }
     });
 
     res.status(200).json({ success: true, tripId: trip._id });
   } catch (err) {
+    console.error('🔥 createShortTrip error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -55,6 +81,9 @@ customerId: customer._id, // ✅ correct and matches schema
 const createParcelTrip = async (req, res) => {
   try {
     const { customerId, pickup, drop, vehicleType, parcelDetails } = req.body;
+
+    const customer = await findUserByIdOrPhone(customerId);
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
 
     const nearbyDrivers = await User.find({
       isDriver: true,
@@ -69,7 +98,7 @@ const createParcelTrip = async (req, res) => {
     });
 
     const trip = await Trip.create({
-customerId: customer._id, // ✅ correct and matches schema
+      customerId: customer._id,
       pickup,
       drop,
       vehicleType,
@@ -78,57 +107,59 @@ customerId: customer._id, // ✅ correct and matches schema
       status: 'requested',
     });
 
+    const payload = {
+      tripId: trip._id,
+      pickup,
+      drop,
+      parcelDetails,
+      vehicleType,
+      customerId: customer._id,
+    };
+
     nearbyDrivers.forEach((driver) => {
-      io.to(driver.socketId).emit('parcelTripRequest', {
-        tripId: trip._id,
-        pickup,
-        drop,
-        parcelDetails,
-        vehicleType,
-customerId: customer._id, // ✅ correct and matches schema
-
-       
-
-      });
+      if (driver.socketId) {
+        io.to(driver.socketId).emit('trip:request', payload);
+        io.to(driver.socketId).emit('parcelTripRequest', payload);
+      } else if (driver.fcmToken) {
+        sendToDriver(driver.fcmToken, 'New Parcel Request', 'A parcel request is nearby.', payload);
+      }
     });
 
     res.status(200).json({ success: true, tripId: trip._id });
   } catch (err) {
+    console.error('🔥 createParcelTrip error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
 const createLongTrip = async (req, res) => {
   try {
-    console.log("📦 Long trip request received:", req.body);
+    console.log('📦 Long trip request received:', req.body);
 
     const { customerId, pickup, drop, vehicleType, isSameDay, tripDays, returnTrip } = req.body;
 
-    // ✅ 1. Find the customer in DB using phone number
-await User.findOneAndUpdate({ phone: driverId }, { socketId: socket.id, isOnline: true });
-
-    if (!customer) {
-      return res.status(404).json({ success: false, message: "Customer not found" });
-    }
+    const customer = await findUserByIdOrPhone(customerId);
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
 
     const radius = isSameDay ? RADIUS.LONG_SAME_DAY : RADIUS.LONG_ADVANCE;
 
-    // ✅ 2. Find nearby drivers
-    const drivers = await User.find({
+    // Build driver query: if same-day require isOnline true, else do not require isOnline (advance booking -> FCM)
+    const driverQuery = {
       isDriver: true,
       vehicleType,
-      isOnline: isSameDay,
       location: {
         $near: {
           $geometry: { type: 'Point', coordinates: pickup.coordinates },
           $maxDistance: radius,
         },
       },
-    });
+    };
+    if (isSameDay) driverQuery.isOnline = true;
 
-    // ✅ 3. Create trip using customer._id (Mongo ObjectId)
+    const drivers = await User.find(driverQuery);
+
     const trip = await Trip.create({
-  customerId: customer._id, // ✅
+      customerId: customer._id,
       pickup,
       drop,
       vehicleType,
@@ -139,40 +170,54 @@ await User.findOneAndUpdate({ phone: driverId }, { socketId: socket.id, isOnline
       tripDays,
     });
 
-console.log(`📤 Sending ${trip.type} trip request to ${drivers.length} drivers`);
+    console.log(`📤 Sending ${trip.type} trip request to ${drivers.length} drivers`);
+    const payload = {
+      tripId: trip._id,
+      pickup,
+      drop,
+      vehicleType,
+      isSameDay,
+      tripDays,
+      returnTrip,
+      customerId: customer._id,
+      type: 'long',
+    };
+
     if (isSameDay) {
       drivers.forEach((driver) => {
-       io.to(driver.socketId).emit('trip:request', {
-  tripId: trip._id,
-  pickup,
-  drop,
-  vehicleType,
-  isSameDay,
-  tripDays,
-  returnTrip,
-  customerId: customer._id,
-  type: 'long',  // <- very important!
-});
-
-
+        if (driver.socketId) {
+          io.to(driver.socketId).emit('trip:request', payload);
+          // keep legacy channel too
+          io.to(driver.socketId).emit('longTripRequest', payload);
+        } else if (driver.fcmToken) {
+          // fallback in case driver is not connected
+          sendToDriver(driver.fcmToken, 'New Long Trip', 'A same-day long trip is available nearby.', payload);
+        }
       });
     } else {
+      // advance bookings -> FCM only
       drivers.forEach((driver) => {
-        sendToDriver(driver.fcmToken, 'New Advance Booking', 'You have a new long trip request.', {
-          tripId: trip._id.toString(),
-          pickup,
-          drop,
-          vehicleType,
-          tripDays,
-          returnTrip,
-        });
+        if (driver.fcmToken) {
+          sendToDriver(
+            driver.fcmToken,
+            'New Advance Booking',
+            'You have a new long trip request.',
+            {
+              tripId: trip._id.toString(),
+              pickup,
+              drop,
+              vehicleType,
+              tripDays,
+              returnTrip,
+            }
+          );
+        }
       });
     }
 
     res.status(200).json({ success: true, tripId: trip._id });
-
   } catch (err) {
-    console.error("🔥 Error in createLongTrip:", err);  // ✅ Add error log
+    console.error('🔥 Error in createLongTrip:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -186,19 +231,24 @@ const acceptTrip = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Trip not available' });
     }
 
-   trip.assignedDriver = mongoose.Types.ObjectId(driverId);
-trip.status = 'driver_assigned';
+    trip.assignedDriver = mongoose.Types.ObjectId(driverId);
+    trip.status = 'driver_assigned';
     await trip.save();
 
-await User.findOneAndUpdate({ phone: driverId }, { socketId: socket.id, isOnline: true });
-    sendToCustomer(customer.fcmToken, 'Driver Accepted', 'A driver has accepted your ride request.', {
-      tripId,
-    });
+    const customer = await User.findById(trip.customerId);
+    if (customer?.socketId) {
+      io.to(customer.socketId).emit('trip:accepted', { tripId, driverId });
+    }
+    if (customer?.fcmToken) {
+      sendToCustomer(customer.fcmToken, 'Driver Accepted', 'A driver has accepted your ride request.', { tripId });
+    }
 
+    // notify other drivers to remove this request
     io.emit('tripRejectedBySystem', { tripId });
 
     res.status(200).json({ success: true });
   } catch (err) {
+    console.error('🔥 acceptTrip error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -212,10 +262,12 @@ const rejectTrip = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Trip not valid' });
     }
 
+    // push to standby reassign logic
     reassignStandbyDriver(trip);
 
     res.status(200).json({ success: true, message: 'Rejection recorded' });
   } catch (err) {
+    console.error('🔥 rejectTrip error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -240,11 +292,9 @@ const cancelTrip = async (req, res) => {
   }
 };
 
-// Optional: Add getTripById if you're using it in routes
 const getTripById = async (req, res) => {
   try {
-    const trip = await Trip.findById(req.params.id).populate('assignedDriver customerId')
-
+    const trip = await Trip.findById(req.params.id).populate('assignedDriver customerId');
     if (!trip) return res.status(404).json({ success: false, message: 'Trip not found' });
 
     res.status(200).json({ success: true, trip });

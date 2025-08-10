@@ -1,18 +1,41 @@
 // src/controllers/locationController.js
 import User from '../models/User.js';
 
+// Helper to resolve by id or phone
+const resolveUserByIdOrPhone = async (idOrPhone) => {
+  if (!idOrPhone) return null;
+  if (typeof idOrPhone === 'string' && /^[0-9a-fA-F]{24}$/.test(idOrPhone)) {
+    const byId = await User.findById(idOrPhone);
+    if (byId) return byId;
+  }
+  return await User.findOne({ phone: idOrPhone });
+};
+
 /**
- * Update live location of a driver
- * @route POST /api/location/driver
+ * Update driver location
+ * Accepts body:
+ * - { driverId, coordinates: [lng,lat] }
+ * - OR { driverId, latitude, longitude }
  */
 const updateDriverLocation = async (req, res) => {
   try {
-    const { driverId, coordinates } = req.body;
+    const { driverId, coordinates, latitude, longitude } = req.body;
 
-    await User.findByIdAndUpdate(driverId, {
+    const user = await resolveUserByIdOrPhone(driverId);
+    if (!user) return res.status(404).json({ success: false, message: 'Driver not found.' });
+
+    const coords = coordinates && Array.isArray(coordinates) && coordinates.length === 2
+      ? coordinates
+      : (typeof latitude === 'number' && typeof longitude === 'number' ? [longitude, latitude] : null);
+
+    if (!coords) {
+      return res.status(400).json({ success: false, message: 'coordinates or latitude/longitude required.' });
+    }
+
+    await User.findByIdAndUpdate(user._id, {
       location: {
         type: 'Point',
-        coordinates,
+        coordinates: coords,
       },
     });
 
@@ -24,17 +47,30 @@ const updateDriverLocation = async (req, res) => {
 };
 
 /**
- * Update live location of a customer
- * @route POST /api/location/customer
+ * Update customer location
+ * Accepts body:
+ * - { customerId, coordinates: [lng,lat] }
+ * - OR { customerId, latitude, longitude }
  */
 const updateCustomerLocation = async (req, res) => {
   try {
-    const { customerId, coordinates } = req.body;
+    const { customerId, coordinates, latitude, longitude } = req.body;
 
-    await User.findByIdAndUpdate(customerId, {
+    const user = await resolveUserByIdOrPhone(customerId);
+    if (!user) return res.status(404).json({ success: false, message: 'Customer not found.' });
+
+    const coords = coordinates && Array.isArray(coordinates) && coordinates.length === 2
+      ? coordinates
+      : (typeof latitude === 'number' && typeof longitude === 'number' ? [longitude, latitude] : null);
+
+    if (!coords) {
+      return res.status(400).json({ success: false, message: 'coordinates or latitude/longitude required.' });
+    }
+
+    await User.findByIdAndUpdate(user._id, {
       location: {
         type: 'Point',
-        coordinates,
+        coordinates: coords,
       },
     });
 
@@ -47,18 +83,18 @@ const updateCustomerLocation = async (req, res) => {
 
 /**
  * Get latest driver location
- * @route GET /api/location/driver/:driverId
+ * returns: { success:true, location: geojson, latitude: ..., longitude: ... }
  */
 const getDriverLocation = async (req, res) => {
   try {
     const { driverId } = req.params;
-
-    const driver = await User.findById(driverId).select('location');
-    if (!driver) {
-      return res.status(404).json({ success: false, message: 'Driver not found.' });
+    const user = await resolveUserByIdOrPhone(driverId);
+    if (!user || !user.location) {
+      return res.status(404).json({ success: false, message: 'Driver not found or location missing.' });
     }
 
-    res.status(200).json({ success: true, location: driver.location });
+    const [lng, lat] = user.location.coordinates || [null, null];
+    res.status(200).json({ success: true, location: user.location, latitude: lat, longitude: lng });
   } catch (err) {
     console.error(`❌ Error in getDriverLocation: ${err.message}`);
     res.status(500).json({ success: false, message: 'Failed to fetch driver location.' });
@@ -67,18 +103,17 @@ const getDriverLocation = async (req, res) => {
 
 /**
  * Get latest customer location
- * @route GET /api/location/customer/:customerId
  */
 const getCustomerLocation = async (req, res) => {
   try {
     const { customerId } = req.params;
-
-    const customer = await User.findById(customerId).select('location');
-    if (!customer) {
-      return res.status(404).json({ success: false, message: 'Customer not found.' });
+    const user = await resolveUserByIdOrPhone(customerId);
+    if (!user || !user.location) {
+      return res.status(404).json({ success: false, message: 'Customer not found or location missing.' });
     }
 
-    res.status(200).json({ success: true, location: customer.location });
+    const [lng, lat] = user.location.coordinates || [null, null];
+    res.status(200).json({ success: true, location: user.location, latitude: lat, longitude: lng });
   } catch (err) {
     console.error(`❌ Error in getCustomerLocation: ${err.message}`);
     res.status(500).json({ success: false, message: 'Failed to fetch customer location.' });
