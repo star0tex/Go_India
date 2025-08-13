@@ -44,30 +44,23 @@ const tripSchema = new mongoose.Schema({
   },
 
   // Canonical GeoJSON fields used across controllers
-  pickup: {
-    type: {
-      type: String,
-      enum: ['Point'],
-      default: 'Point',
-    },
+pickup: {
+    type: { type: String, enum: ['Point'], default: 'Point' },
     coordinates: {
       type: [Number], // [lng, lat]
-      index: '2dsphere',
+      required: true,
+      
     },
-    address: { type: String },
+    address: String,
   },
-
   drop: {
-    type: {
-      type: String,
-      enum: ['Point'],
-      default: 'Point',
-    },
+    type: { type: String, enum: ['Point'], default: 'Point' },
     coordinates: {
       type: [Number], // [lng, lat]
-      index: '2dsphere',
+      required: true,
+      
     },
-    address: { type: String },
+    address: String,
   },
 
   // Legacy/compat fields (optional)
@@ -92,7 +85,7 @@ const tripSchema = new mongoose.Schema({
 });
 
 // Ensure geospatial indexes
-tripSchema.index({ 'pickup': '2dsphere' });
-tripSchema.index({ 'drop': '2dsphere' });
+tripSchema.index({ 'pickup.coordinates': '2dsphere' });
+tripSchema.index({ 'drop.coordinates': '2dsphere' });
 
 export default mongoose.model('Trip', tripSchema);

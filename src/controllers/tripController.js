@@ -6,12 +6,29 @@ import { io } from '../socket/socketHandler.js';
 import { reassignStandbyDriver } from './standbyController.js';
 import mongoose from 'mongoose';
 
+
+
 const RADIUS = {
   SHORT: 3000,
   PARCEL: 3000,
   LONG_SAME_DAY: 20000,
   LONG_ADVANCE: 50000,
 };
+
+function normalizeCoordinates(coords) {
+  if (!Array.isArray(coords) || coords.length !== 2) {
+    throw new Error('Coordinates must be [lat, lng] or [lng, lat]');
+  }
+  const [a, b] = coords.map(Number);
+  // Heuristic: latitude is between -90 and 90
+  if (Math.abs(a) <= 90 && Math.abs(b) <= 180) {
+    // Format is [lat, lng] -> swap
+    return [b, a];
+  }
+  // Otherwise assume already [lng, lat]
+  return [a, b];
+}
+
 
 // helper: accept either ObjectId string or phone string
 const findUserByIdOrPhone = async (idOrPhone) => {
@@ -23,10 +40,14 @@ const findUserByIdOrPhone = async (idOrPhone) => {
   // fallback to phone lookup
   return await User.findOne({ phone: idOrPhone });
 };
+ 
 
 const createShortTrip = async (req, res) => {
   try {
     const { customerId, pickup, drop, vehicleType } = req.body;
+console.log("📍 Incoming trip request:", req.body);
+    pickup.coordinates = normalizeCoordinates(pickup.coordinates);
+    drop.coordinates = normalizeCoordinates(drop.coordinates);
 
     const customer = await findUserByIdOrPhone(customerId);
     if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
@@ -71,6 +92,8 @@ const createShortTrip = async (req, res) => {
       }
     });
 
+   console.log(`Short Trip: Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
+
     res.status(200).json({ success: true, tripId: trip._id });
   } catch (err) {
     console.error('🔥 createShortTrip error:', err);
@@ -81,6 +104,9 @@ const createShortTrip = async (req, res) => {
 const createParcelTrip = async (req, res) => {
   try {
     const { customerId, pickup, drop, vehicleType, parcelDetails } = req.body;
+   
+    pickup.coordinates = normalizeCoordinates(pickup.coordinates);
+    drop.coordinates = normalizeCoordinates(drop.coordinates);
 
     const customer = await findUserByIdOrPhone(customerId);
     if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
@@ -125,6 +151,8 @@ const createParcelTrip = async (req, res) => {
       }
     });
 
+   console.log(`Parcel Trip: Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
+
     res.status(200).json({ success: true, tripId: trip._id });
   } catch (err) {
     console.error('🔥 createParcelTrip error:', err);
@@ -135,6 +163,10 @@ const createParcelTrip = async (req, res) => {
 const createLongTrip = async (req, res) => {
   try {
     console.log('📦 Long trip request received:', req.body);
+   
+    pickup.coordinates = normalizeCoordinates(pickup.coordinates);
+    drop.coordinates = normalizeCoordinates(drop.coordinates);
+
 
     const { customerId, pickup, drop, vehicleType, isSameDay, tripDays, returnTrip } = req.body;
 
@@ -170,7 +202,7 @@ const createLongTrip = async (req, res) => {
       tripDays,
     });
 
-    console.log(`📤 Sending ${trip.type} trip request to ${drivers.length} drivers`);
+    console.log(`Sending ${trip.type} trip request to ${drivers.length} drivers`);
     const payload = {
       tripId: trip._id,
       pickup,
@@ -214,6 +246,8 @@ const createLongTrip = async (req, res) => {
         }
       });
     }
+
+    console.log(`Long Trip: Found ${drivers.length} drivers near pickup`, pickup.coordinates);
 
     res.status(200).json({ success: true, tripId: trip._id });
   } catch (err) {

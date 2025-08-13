@@ -87,6 +87,7 @@ const userSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+userSchema.index({ location: '2dsphere' });
 
 // ✅ Prevent OverwriteModelError in dev
 const User = mongoose.models.User || mongoose.model("User", userSchema);
