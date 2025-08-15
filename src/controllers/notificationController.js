@@ -3,14 +3,26 @@ import Trip from '../models/Trip.js';
 import User from '../models/User.js';
 import { sendFCMToDriver, sendFCMToCustomer } from '../utils/fcmSender.js';
 
+/**
+ * Sends trip-related push notifications.
+ * @param {'driver'|'customer'} to - Who to send the notification to.
+ * @param {string} type - The notification type.
+ * @param {string} tripId - The ID of the trip.
+ */
 const sendTripNotification = async (to, type, tripId) => {
   try {
     const trip = await Trip.findById(tripId);
-    if (!trip) return;
+    if (!trip) {
+      console.warn(`⚠️ Trip ${tripId} not found`);
+      return;
+    }
 
     if (to === 'driver') {
-      const driver = await User.findById(trip.driver);
-      if (!driver || !driver.fcmToken) return;
+      const driver = await User.findById(trip.assignedDriver);
+      if (!driver || !driver.fcmToken) {
+        console.warn(`⚠️ No FCM token for driver on trip ${tripId}`);
+        return;
+      }
 
       let title = '';
       let body = '';
@@ -37,8 +49,11 @@ const sendTripNotification = async (to, type, tripId) => {
     }
 
     if (to === 'customer') {
-      const customer = await User.findById(trip.customer);
-      if (!customer || !customer.fcmToken) return;
+      const customer = await User.findById(trip.customerId);
+      if (!customer || !customer.fcmToken) {
+        console.warn(`⚠️ No FCM token for customer on trip ${tripId}`);
+        return;
+      }
 
       let title = '';
       let body = '';
@@ -56,7 +71,7 @@ const sendTripNotification = async (to, type, tripId) => {
         body,
         data: {
           tripId: trip._id.toString(),
-          driver: trip.driver,
+          driver: trip.assignedDriver,
         },
       });
     }
@@ -65,13 +80,17 @@ const sendTripNotification = async (to, type, tripId) => {
   }
 };
 
+/**
+ * Sends a manual notification to all drivers or customers.
+ */
 const sendManualNotification = async (req, res) => {
   try {
     const { title, body, userType } = req.body;
 
-    const filter = userType === 'driver'
-      ? { isDriver: true, fcmToken: { $exists: true } }
-      : { isDriver: false, fcmToken: { $exists: true } };
+    const filter =
+      userType === 'driver'
+        ? { isDriver: true, fcmToken: { $exists: true, $ne: null } }
+        : { isDriver: false, fcmToken: { $exists: true, $ne: null } };
 
     const users = await User.find(filter);
 
@@ -83,18 +102,31 @@ const sendManualNotification = async (req, res) => {
 
     await Promise.all(sendTasks);
 
-    res.status(200).json({ success: true, message: `Notification sent to ${users.length} ${userType}s.` });
+    res.status(200).json({
+      success: true,
+      message: `Notification sent to ${users.length} ${userType}s.`,
+    });
   } catch (err) {
     console.error(`❌ Error in sendManualNotification: ${err.message}`);
-    res.status(500).json({ success: false, message: 'Failed to send notification.' });
+    res
+      .status(500)
+      .json({ success: false, message: 'Failed to send notification.' });
   }
 };
 
+/**
+ * Sends a notification to a driver when they are reassigned to a trip.
+ */
 const sendReassignmentNotification = async (driverId, tripId) => {
   try {
     const driver = await User.findById(driverId);
     const trip = await Trip.findById(tripId);
-    if (!driver || !trip || !driver.fcmToken) return;
+    if (!driver || !trip || !driver.fcmToken) {
+      console.warn(
+        `⚠️ Cannot send reassignment notification: missing driver/trip/token`
+      );
+      return;
+    }
 
     await sendFCMToDriver(driver.fcmToken, {
       title: 'Trip Reassignment',

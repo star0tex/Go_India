@@ -8,17 +8,48 @@ import { promoteNextStandby, reassignStandbyDriver } from '../controllers/standb
 
 let io;
 
-const connectedDrivers = new Map(); // socketId => userId (string)
-const connectedCustomers = new Map(); // socketId => userId (string)
+const connectedDrivers = new Map(); // socketId => userId
+const connectedCustomers = new Map(); // socketId => userId
 
-// helper: resolve user by id or phone
+// Distance limits by trip type
+const DISTANCE_LIMITS = {
+  short: 5000,
+  parcel: 5000,
+  long_same_day: 20000,
+  long_multi_day: 50000,
+};
+
+// Helper: resolve user by id or phone
 const resolveUserByIdOrPhone = async (idOrPhone) => {
   if (!idOrPhone) return null;
-  if (typeof idOrPhone === 'string' && /^[0-9a-fA-F]{24}$/.test(idOrPhone)) {
-    const byId = await User.findById(idOrPhone);
-    if (byId) return byId;
+  try {
+    if (typeof idOrPhone === 'string' && /^[0-9a-fA-F]{24}$/.test(idOrPhone)) {
+      const byId = await User.findById(idOrPhone);
+      if (byId) return byId;
+    }
+    return await User.findOne({ phone: idOrPhone });
+  } catch (err) {
+    console.error('❌ resolveUserByIdOrPhone error:', err);
+    return null;
   }
-  return await User.findOne({ phone: idOrPhone });
+};
+
+// Broadcast trip to given drivers
+const broadcastTripToDrivers = (drivers, tripPayload) => {
+  drivers.forEach((driver) => {
+    if (driver.socketId) {
+      io.to(driver.socketId).emit('trip:request', tripPayload);
+      io.to(driver.socketId).emit('tripRequest', tripPayload); // legacy support
+      console.log(`📤 Sent trip to driver ${driver._id}`);
+    } else if (driver.fcmToken) {
+      sendToDriver(
+        driver.fcmToken,
+        'New Ride Request',
+        'A trip request is available',
+        tripPayload
+      );
+    }
+  });
 };
 
 export const initSocket = (httpServer) => {
@@ -30,11 +61,12 @@ export const initSocket = (httpServer) => {
     console.log(`🟢 New connection: ${socket.id}`);
 
     /**
-     * 🔹 Register / update driver status + location
-     * This now accepts `location` so we can use $near queries later
+     * 🔹 Driver status update
      */
     socket.on('updateDriverStatus', async ({ driverId, isOnline, location }) => {
       try {
+        if (!driverId) return;
+
         const user = await resolveUserByIdOrPhone(driverId);
         if (!user) {
           console.warn(`updateDriverStatus: user not found for ${driverId}`);
@@ -46,7 +78,11 @@ export const initSocket = (httpServer) => {
           isOnline: !!isOnline,
         };
 
-        if (location?.coordinates?.length === 2) {
+        if (
+          location?.coordinates?.length === 2 &&
+          typeof location.coordinates[0] === 'number' &&
+          typeof location.coordinates[1] === 'number'
+        ) {
           updateData.location = {
             type: 'Point',
             coordinates: location.coordinates, // [lng, lat]
@@ -55,17 +91,18 @@ export const initSocket = (httpServer) => {
 
         await User.findByIdAndUpdate(user._id, updateData);
         connectedDrivers.set(socket.id, user._id.toString());
-        console.log(
-          `📶 Driver ${user._id} is now ${isOnline ? 'online' : 'offline'} (socket ${socket.id})`
-        );
+        console.log(`📶 Driver ${user._id} is now ${isOnline ? 'online' : 'offline'}`);
       } catch (e) {
         console.error('❌ updateDriverStatus error:', e);
       }
     });
 
-    // 🔹 Register customer
+    /**
+     * 🔹 Customer register
+     */
     socket.on('customer:register', async ({ customerId }) => {
       try {
+        if (!customerId) return;
         const user = await resolveUserByIdOrPhone(customerId);
         if (!user) {
           console.warn(`customer:register - user not found for ${customerId}`);
@@ -74,39 +111,105 @@ export const initSocket = (httpServer) => {
         }
         await User.findByIdAndUpdate(user._id, { socketId: socket.id });
         connectedCustomers.set(socket.id, user._id.toString());
-        console.log(`👤 Customer registered: ${user._id} (socket ${socket.id})`);
+        console.log(`👤 Customer registered: ${user._id}`);
       } catch (e) {
         console.error('❌ customer:register error:', e);
       }
     });
 
     /**
-     * 🔹 Customer requests trip (short, parcel, long)
-     * Sends trip request to nearby online drivers
+     * 🔹 Customer requests trip
      */
-    socket.on('customer:request_trip', async ({ tripId }) => {
+    socket.on('customer:request_trip', async (payload) => {
       try {
-        const trip = await Trip.findById(tripId);
-        if (!trip) return;
+        const {
+          customerId,
+          pickup,
+          drop,
+          vehicleType,
+          type,
+          distance,
+          duration,
+          tripTime,
+        } = payload;
 
+        // Basic validation
+        if (
+          !customerId ||
+          !pickup?.lng ||
+          !pickup?.lat ||
+          !drop?.lng ||
+          !drop?.lat ||
+          !vehicleType ||
+          !type
+        ) {
+          console.warn('⚠️ Invalid trip request payload:', payload);
+          return;
+        }
+
+        const pickupGeo = {
+          type: 'Point',
+          coordinates: [pickup.lng, pickup.lat],
+          address: pickup.address || '',
+        };
+        const dropGeo = {
+          type: 'Point',
+          coordinates: [drop.lng, drop.lat],
+          address: drop.address || '',
+        };
+
+        const isSameDay =
+          type === 'long' && tripTime
+            ? new Date(tripTime).toDateString() === new Date().toDateString()
+            : null;
+
+        const trip = await Trip.create({
+          customerId,
+          vehicleType,
+          type,
+          pickup: pickupGeo,
+          drop: dropGeo,
+          pickupLocation: {
+            lat: pickup.lat,
+            lng: pickup.lng,
+            address: pickup.address || '',
+          },
+          dropLocation: {
+            lat: drop.lat,
+            lng: drop.lng,
+            address: drop.address || '',
+          },
+          distance: Number(distance) || 0,
+          duration: Number(duration) || 0,
+          tripTime:
+            type === 'long' && tripTime ? new Date(tripTime).toISOString() : null,
+          isSameDay,
+        });
+
+        // Fetch online drivers
         const drivers = await User.find({
           isDriver: true,
           vehicleType: trip.vehicleType,
           isOnline: true,
         });
 
+        // Filter nearby
         const nearbyDrivers = drivers.filter((driver) => {
-          if (!driver.location || !trip.pickup) return false;
-          const distance = calculateDistanceInMeters(
+          if (!driver.location?.coordinates) return false;
+          const dist = calculateDistanceInMeters(
             driver.location.coordinates,
             trip.pickup.coordinates
           );
-          if (trip.type === 'short' || trip.type === 'parcel') return distance <= 5000;
-          if (trip.type === 'long' && trip.isSameDay) return distance <= 20000;
+          if (type === 'short' || type === 'parcel')
+            return dist <= DISTANCE_LIMITS.short;
+          if (type === 'long' && isSameDay)
+            return dist <= DISTANCE_LIMITS.long_same_day;
+          if (type === 'long' && !isSameDay)
+            return dist <= DISTANCE_LIMITS.long_multi_day;
           return false;
         });
 
-        const payload = {
+        const tripPayload = {
           tripId: trip._id,
           pickup: trip.pickup,
           drop: trip.drop,
@@ -114,25 +217,10 @@ export const initSocket = (httpServer) => {
           type: trip.type,
         };
 
-        nearbyDrivers.forEach((driver) => {
-          if (driver.socketId) {
-            console.log(
-              `📤 Emitted trip to driver ${driver._id} socket ${driver.socketId}`
-            );
-            io.to(driver.socketId).emit('trip:request', payload);
-            io.to(driver.socketId).emit('tripRequest', payload); // legacy
-          } else if (driver.fcmToken) {
-            sendToDriver(
-              driver.fcmToken,
-              'New Ride Request',
-              'A trip request is available',
-              payload
-            );
-          }
-        });
+        broadcastTripToDrivers(nearbyDrivers, tripPayload);
 
         console.log(
-          `📡 Trip request sent to ${nearbyDrivers.length} drivers for trip ${tripId}`
+          `📡 Trip request (${type}) sent to ${nearbyDrivers.length} drivers`
         );
       } catch (e) {
         console.error('❌ customer:request_trip error:', e);
@@ -141,32 +229,47 @@ export const initSocket = (httpServer) => {
 
     /**
      * 🔹 Driver accepts trip
-     * Assigns driver to trip and notifies customer
      */
     socket.on('driver:accept_trip', async ({ tripId, driverId }) => {
       try {
+        if (!tripId || !driverId) return;
         const trip = await Trip.findById(tripId);
         if (!trip || trip.status !== 'requested') return;
+
+        if (trip.assignedDriver) {
+          console.warn(`⏭ Trip ${tripId} already assigned`);
+          return;
+        }
 
         trip.assignedDriver = driverId;
         trip.status = 'driver_assigned';
         await trip.save();
+
+        await promoteNextStandby(tripId, driverId);
 
         const customer = await User.findById(trip.customerId);
         if (customer?.socketId) {
           io.to(customer.socketId).emit('trip:accepted', { tripId, driverId });
         }
 
-        io.emit('trip:rejected_by_system', { tripId });
+        connectedDrivers.forEach((uid, sockId) => {
+          if (uid.toString() !== driverId.toString()) {
+            io.to(sockId).emit('trip:rejected_by_system', { tripId });
+          }
+        });
+
         console.log(`✅ Trip ${tripId} accepted by driver ${driverId}`);
       } catch (e) {
         console.error('❌ driver:accept_trip error:', e);
       }
     });
 
-    // 🔹 Trip timeout fallback
+    /**
+     * 🔹 Trip timeout fallback
+     */
     socket.on('trip:timeout', async ({ tripId }) => {
       try {
+        if (!tripId) return;
         const trip = await Trip.findById(tripId);
         if (!trip || trip.status !== 'requested') return;
 
@@ -176,11 +279,8 @@ export const initSocket = (httpServer) => {
             vehicleType: trip.vehicleType,
             location: {
               $near: {
-                $geometry: {
-                  type: 'Point',
-                  coordinates: trip.pickup.coordinates,
-                },
-                $maxDistance: 50000,
+                $geometry: { type: 'Point', coordinates: trip.pickup.coordinates },
+                $maxDistance: DISTANCE_LIMITS.long_multi_day,
               },
             },
           });
@@ -201,9 +301,7 @@ export const initSocket = (httpServer) => {
             }
           });
 
-          console.log(
-            `📲 FCM fallback sent to ${drivers.length} drivers for advance trip`
-          );
+          console.log(`📲 FCM fallback sent to ${drivers.length} drivers`);
         } else {
           await reassignStandbyDriver(trip);
           console.log(`♻️ Standby reassignment triggered for trip ${tripId}`);
@@ -213,17 +311,16 @@ export const initSocket = (httpServer) => {
       }
     });
 
-    // 🔹 Disconnect cleanup
+    /**
+     * 🔹 Disconnect cleanup
+     */
     socket.on('disconnect', async () => {
       try {
         const driverId = connectedDrivers.get(socket.id);
         const customerId = connectedCustomers.get(socket.id);
 
         if (driverId) {
-          await User.findByIdAndUpdate(driverId, {
-            isOnline: false,
-            socketId: null,
-          });
+          await User.findByIdAndUpdate(driverId, { isOnline: false, socketId: null });
           connectedDrivers.delete(socket.id);
           console.log(`🔴 Driver disconnected: ${driverId}`);
         }

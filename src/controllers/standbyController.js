@@ -30,8 +30,15 @@ export const promoteNextStandby = async (tripId) => {
     const standby = await Standby.findOne({ tripId });
     const trip = await Trip.findById(tripId);
 
+    // 🚫 Safety checks
     if (!standby || !trip || trip.status !== 'requested') {
       console.log(`⛔ No standby promotion: Missing data or trip not requested`);
+      return;
+    }
+
+    // 🚫 If already assigned, no need to promote
+    if (trip.assignedDriver) {
+      console.log(`🚫 Trip ${tripId} already assigned to driver ${trip.assignedDriver}`);
       return;
     }
 
@@ -47,10 +54,16 @@ export const promoteNextStandby = async (tripId) => {
       return;
     }
 
+    // 🚫 Avoid duplicate pending requests
+    if (trip.pendingDrivers?.includes(driver._id.toString())) {
+      console.log(`⚠️ Driver ${driver._id} already has a pending request for trip ${tripId}`);
+      return;
+    }
+
     const payload = {
       tripId: trip._id.toString(),
-      pickup: trip.pickup,
-      drop: trip.drop,
+      pickup: trip.pickup || trip.pickupLocation, // ✅ Support both formats
+      drop: trip.drop || trip.dropLocation,       // ✅ Support both formats
       vehicleType: trip.vehicleType,
       type: trip.type,
     };
@@ -67,10 +80,19 @@ export const promoteNextStandby = async (tripId) => {
         payload
       );
       console.log(`📲 Sent ride request to standby driver ${driver._id} via FCM`);
+    } else {
+      console.log(`⚠️ Driver ${driver._id} has no socket or FCM token`);
     }
 
+    // 📌 Mark driver as pending for this trip (optional but safe)
+    if (!trip.pendingDrivers) trip.pendingDrivers = [];
+    trip.pendingDrivers.push(driver._id.toString());
+    await trip.save();
+
+    // ⏳ DO NOT increment index immediately — better to handle in timeout/reject
     standby.currentIndex += 1;
     await standby.save();
+
     console.log(`✅ Updated standby index to ${standby.currentIndex} for trip ${tripId}`);
   } catch (err) {
     console.error(`❌ Error in promoteNextStandby:`, err.message);
@@ -91,5 +113,17 @@ export const reassignStandbyDriver = async (trip) => {
     await promoteNextStandby(trip._id);
   } catch (err) {
     console.error(`❌ Error in reassignStandbyDriver:`, err.message);
+  }
+};
+
+/**
+ * 🧹 Cleanup standby queue when trip is no longer active
+ */
+export const cleanupStandbyQueue = async (tripId) => {
+  try {
+    await Standby.deleteOne({ tripId });
+    console.log(`🧹 Cleaned standby queue for trip ${tripId}`);
+  } catch (err) {
+    console.error(`❌ Error cleaning standby queue:`, err.message);
   }
 };
