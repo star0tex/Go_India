@@ -1,17 +1,20 @@
-// src/socket/socketHandler.js
 import { Server } from 'socket.io';
 import User from '../models/User.js';
 import Trip from '../models/Trip.js';
 import { sendToDriver } from '../utils/fcmSender.js';
-import { calculateDistanceInMeters } from '../utils/distanceCalculator.js';
 import { promoteNextStandby, reassignStandbyDriver } from '../controllers/standbyController.js';
+import {
+  createShortTrip,
+  createParcelTrip,
+  createLongTrip,
+} from '../controllers/tripController.js';
+import { emitTripError } from '../utils/errorEmitter.js';
 
 let io;
 
 const connectedDrivers = new Map(); // socketId => userId
 const connectedCustomers = new Map(); // socketId => userId
 
-// Distance limits by trip type
 const DISTANCE_LIMITS = {
   short: 5000,
   parcel: 5000,
@@ -19,7 +22,6 @@ const DISTANCE_LIMITS = {
   long_multi_day: 50000,
 };
 
-// Helper: resolve user by id or phone
 const resolveUserByIdOrPhone = async (idOrPhone) => {
   if (!idOrPhone) return null;
   try {
@@ -34,22 +36,13 @@ const resolveUserByIdOrPhone = async (idOrPhone) => {
   }
 };
 
-// Broadcast trip to given drivers
-const broadcastTripToDrivers = (drivers, tripPayload) => {
-  drivers.forEach((driver) => {
-    if (driver.socketId) {
-      io.to(driver.socketId).emit('trip:request', tripPayload);
-      io.to(driver.socketId).emit('tripRequest', tripPayload); // legacy support
-      console.log(`📤 Sent trip to driver ${driver._id}`);
-    } else if (driver.fcmToken) {
-      sendToDriver(
-        driver.fcmToken,
-        'New Ride Request',
-        'A trip request is available',
-        tripPayload
-      );
-    }
-  });
+const validateTripPayload = (payload) => {
+  if (!payload || typeof payload !== 'object') return false;
+  const { type, customerId, pickup, drop, vehicleType } = payload;
+  if (!type || !customerId || !pickup || !drop || !vehicleType) return false;
+  if (!pickup.coordinates || !Array.isArray(pickup.coordinates) || pickup.coordinates.length !== 2) return false;
+  if (!drop.coordinates || !Array.isArray(drop.coordinates) || drop.coordinates.length !== 2) return false;
+  return true;
 };
 
 export const initSocket = (httpServer) => {
@@ -93,6 +86,7 @@ export const initSocket = (httpServer) => {
         connectedDrivers.set(socket.id, user._id.toString());
         console.log(`📶 Driver ${user._id} is now ${isOnline ? 'online' : 'offline'}`);
       } catch (e) {
+        emitTripError({ socket, message: 'Failed to update driver status.' });
         console.error('❌ updateDriverStatus error:', e);
       }
     });
@@ -113,116 +107,57 @@ export const initSocket = (httpServer) => {
         connectedCustomers.set(socket.id, user._id.toString());
         console.log(`👤 Customer registered: ${user._id}`);
       } catch (e) {
+        emitTripError({ socket, message: 'Failed to register customer.' });
         console.error('❌ customer:register error:', e);
       }
     });
 
     /**
-     * 🔹 Customer requests trip
+     * 🔹 Customer requests trip (HYBRID FLOW)
+     * Route to tripController, do not create trip here!
      */
     socket.on('customer:request_trip', async (payload) => {
       try {
-        const {
-          customerId,
-          pickup,
-          drop,
-          vehicleType,
-          type,
-          distance,
-          duration,
-          tripTime,
-        } = payload;
-
-        // Basic validation
-        if (
-          !customerId ||
-          !pickup?.lng ||
-          !pickup?.lat ||
-          !drop?.lng ||
-          !drop?.lat ||
-          !vehicleType ||
-          !type
-        ) {
-          console.warn('⚠️ Invalid trip request payload:', payload);
+        // Strict payload validation
+        if (!validateTripPayload(payload)) {
+          emitTripError({ socket, message: 'Invalid trip request payload.' });
           return;
         }
 
-        const pickupGeo = {
-          type: 'Point',
-          coordinates: [pickup.lng, pickup.lat],
-          address: pickup.address || '',
-        };
-        const dropGeo = {
-          type: 'Point',
-          coordinates: [drop.lng, drop.lat],
-          address: drop.address || '',
-        };
+        const { type } = payload;
+        let controllerFn;
+        if (type === 'short') controllerFn = createShortTrip;
+        else if (type === 'parcel') controllerFn = createParcelTrip;
+        else if (type === 'long') controllerFn = createLongTrip;
+        else {
+          emitTripError({ socket, message: 'Unknown trip type.' });
+          return;
+        }
 
-        const isSameDay =
-          type === 'long' && tripTime
-            ? new Date(tripTime).toDateString() === new Date().toDateString()
-            : null;
-
-        const trip = await Trip.create({
-          customerId,
-          vehicleType,
-          type,
-          pickup: pickupGeo,
-          drop: dropGeo,
-          pickupLocation: {
-            lat: pickup.lat,
-            lng: pickup.lng,
-            address: pickup.address || '',
-          },
-          dropLocation: {
-            lat: drop.lat,
-            lng: drop.lng,
-            address: drop.address || '',
-          },
-          distance: Number(distance) || 0,
-          duration: Number(duration) || 0,
-          tripTime:
-            type === 'long' && tripTime ? new Date(tripTime).toISOString() : null,
-          isSameDay,
-        });
-
-        // Fetch online drivers
-        const drivers = await User.find({
-          isDriver: true,
-          vehicleType: trip.vehicleType,
-          isOnline: true,
-        });
-
-        // Filter nearby
-        const nearbyDrivers = drivers.filter((driver) => {
-          if (!driver.location?.coordinates) return false;
-          const dist = calculateDistanceInMeters(
-            driver.location.coordinates,
-            trip.pickup.coordinates
-          );
-          if (type === 'short' || type === 'parcel')
-            return dist <= DISTANCE_LIMITS.short;
-          if (type === 'long' && isSameDay)
-            return dist <= DISTANCE_LIMITS.long_same_day;
-          if (type === 'long' && !isSameDay)
-            return dist <= DISTANCE_LIMITS.long_multi_day;
-          return false;
-        });
-
-        const tripPayload = {
-          tripId: trip._id,
-          pickup: trip.pickup,
-          drop: trip.drop,
-          vehicleType: trip.vehicleType,
-          type: trip.type,
+        // Attach socket to req/res-like objects
+        const req = { body: payload };
+        const res = {
+          status: (code) => ({
+            json: (data) => {
+              // Always emit back to customer
+              socket.emit('trip:request_response', { ...data, status: code });
+              if (data.success && data.tripId) {
+                console.log(
+                  `🛣️ Trip request (${type}) routed to controller. TripId: ${data.tripId}`
+                );
+                if (data.drivers === 0) {
+                  emitTripError({ socket, tripId: data.tripId, message: 'No drivers available.' });
+                }
+              } else if (!data.success) {
+                emitTripError({ socket, message: data.message });
+              }
+            },
+          }),
         };
 
-        broadcastTripToDrivers(nearbyDrivers, tripPayload);
-
-        console.log(
-          `📡 Trip request (${type}) sent to ${nearbyDrivers.length} drivers`
-        );
+        await controllerFn(req, res);
       } catch (e) {
+        emitTripError({ socket, message: 'Internal server error.' });
         console.error('❌ customer:request_trip error:', e);
       }
     });
@@ -232,11 +167,19 @@ export const initSocket = (httpServer) => {
      */
     socket.on('driver:accept_trip', async ({ tripId, driverId }) => {
       try {
-        if (!tripId || !driverId) return;
+        if (!tripId || !driverId) {
+          emitTripError({ socket, message: 'Missing tripId or driverId.' });
+          return;
+        }
         const trip = await Trip.findById(tripId);
-        if (!trip || trip.status !== 'requested') return;
+        if (!trip || trip.status !== 'requested') {
+          emitTripError({ socket, tripId, message: 'Trip not available.' });
+          return;
+        }
 
         if (trip.assignedDriver) {
+          socket.emit('trip:already_assigned', { tripId });
+          emitTripError({ socket, tripId, message: 'Trip already assigned.' });
           console.warn(`⏭ Trip ${tripId} already assigned`);
           return;
         }
@@ -260,6 +203,7 @@ export const initSocket = (httpServer) => {
 
         console.log(`✅ Trip ${tripId} accepted by driver ${driverId}`);
       } catch (e) {
+        emitTripError({ socket, tripId, message: 'Failed to accept trip.' });
         console.error('❌ driver:accept_trip error:', e);
       }
     });
@@ -269,9 +213,15 @@ export const initSocket = (httpServer) => {
      */
     socket.on('trip:timeout', async ({ tripId }) => {
       try {
-        if (!tripId) return;
+        if (!tripId) {
+          emitTripError({ socket, message: 'Missing tripId for timeout.' });
+          return;
+        }
         const trip = await Trip.findById(tripId);
-        if (!trip || trip.status !== 'requested') return;
+        if (!trip || trip.status !== 'requested') {
+          emitTripError({ socket, tripId, message: 'Trip not available for timeout.' });
+          return;
+        }
 
         if (trip.type === 'long' && !trip.isSameDay) {
           const drivers = await User.find({
@@ -307,6 +257,7 @@ export const initSocket = (httpServer) => {
           console.log(`♻️ Standby reassignment triggered for trip ${tripId}`);
         }
       } catch (e) {
+        emitTripError({ socket, tripId, message: 'Failed to handle trip timeout.' });
         console.error('❌ trip:timeout error:', e);
       }
     });
@@ -338,5 +289,3 @@ export const initSocket = (httpServer) => {
 
   console.log('🚀 Socket.IO initialized');
 };
-
-export { io };

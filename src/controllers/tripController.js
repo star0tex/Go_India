@@ -1,17 +1,11 @@
-// src/controllers/tripController.js
 import Trip from '../models/Trip.js';
 import User from '../models/User.js';
-import { sendToDriver, sendToCustomer } from '../utils/fcmSender.js';
+import { sendToCustomer } from '../utils/fcmSender.js';
 import { io } from '../socket/socketHandler.js';
 import { reassignStandbyDriver } from './standbyController.js';
 import mongoose from 'mongoose';
-
-const RADIUS = {
-  SHORT: 3000,
-  PARCEL: 3000,
-  LONG_SAME_DAY: 20000,
-  LONG_ADVANCE: 50000,
-};
+import { broadcastTripToDrivers } from '../utils/tripBroadcaster.js';
+import { TRIP_LIMITS } from '../config/tripConfig.js';
 
 function normalizeCoordinates(coords) {
   if (!Array.isArray(coords) || coords.length !== 2) {
@@ -40,7 +34,12 @@ const createShortTrip = async (req, res) => {
     drop.coordinates = normalizeCoordinates(drop.coordinates);
 
     const customer = await findUserByIdOrPhone(customerId);
-    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+    if (!customer) {
+      if (customer?.socketId) {
+        io.to(customer.socketId).emit('trip:error', { message: 'Customer not found' });
+      }
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
 
     const nearbyDrivers = await User.find({
       isDriver: true,
@@ -49,7 +48,7 @@ const createShortTrip = async (req, res) => {
       location: {
         $near: {
           $geometry: { type: 'Point', coordinates: pickup.coordinates },
-          $maxDistance: RADIUS.SHORT,
+          $maxDistance: TRIP_LIMITS.SHORT,
         },
       },
     });
@@ -63,21 +62,32 @@ const createShortTrip = async (req, res) => {
       status: 'requested',
     });
 
-    const payload = { tripId: trip._id, pickup, drop, vehicleType };
+    const payload = {
+      tripId: trip._id,
+      type: 'short',
+      pickup,
+      drop,
+      vehicleType,
+      customerId: customer._id,
+    };
 
-    nearbyDrivers.forEach((driver) => {
-      if (driver.socketId) {
-        io.to(driver.socketId).emit('trip:request', payload);
-        io.to(driver.socketId).emit('tripRequest', payload);
-      } else if (driver.fcmToken) {
-        sendToDriver(driver.fcmToken, 'New Ride Request', 'A ride is nearby. Open the app to accept.', payload);
-      }
-    });
+    if (!nearbyDrivers.length) {
+      console.warn(`⚠️ No drivers found for short trip ${trip._id}`);
+      return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
+    }
 
-    console.log(`Short Trip: Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
-    res.status(200).json({ success: true, tripId: trip._id });
+    broadcastTripToDrivers(nearbyDrivers, payload, io);
+
+    console.log(`Short Trip created: ${trip._id}. Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
+    res.status(200).json({ success: true, tripId: trip._id, drivers: nearbyDrivers.length });
   } catch (err) {
     console.error('🔥 createShortTrip error:', err);
+    if (req.body?.customerId) {
+      const customer = await findUserByIdOrPhone(req.body.customerId);
+      if (customer?.socketId) {
+        io.to(customer.socketId).emit('trip:error', { message: err.message });
+      }
+    }
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -89,7 +99,12 @@ const createParcelTrip = async (req, res) => {
     drop.coordinates = normalizeCoordinates(drop.coordinates);
 
     const customer = await findUserByIdOrPhone(customerId);
-    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+    if (!customer) {
+      if (customer?.socketId) {
+        io.to(customer.socketId).emit('trip:error', { message: 'Customer not found' });
+      }
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
 
     const nearbyDrivers = await User.find({
       isDriver: true,
@@ -98,7 +113,7 @@ const createParcelTrip = async (req, res) => {
       location: {
         $near: {
           $geometry: { type: 'Point', coordinates: pickup.coordinates },
-          $maxDistance: RADIUS.PARCEL,
+          $maxDistance: TRIP_LIMITS.PARCEL,
         },
       },
     });
@@ -109,32 +124,36 @@ const createParcelTrip = async (req, res) => {
       drop,
       vehicleType,
       type: 'parcel',
-      parcelDetails, // will store if schema allows
+      parcelDetails,
       status: 'requested',
     });
 
     const payload = {
       tripId: trip._id,
+      type: 'parcel',
       pickup,
       drop,
-      parcelDetails,
       vehicleType,
       customerId: customer._id,
     };
 
-    nearbyDrivers.forEach((driver) => {
-      if (driver.socketId) {
-        io.to(driver.socketId).emit('trip:request', payload);
-        io.to(driver.socketId).emit('parcelTripRequest', payload);
-      } else if (driver.fcmToken) {
-        sendToDriver(driver.fcmToken, 'New Parcel Request', 'A parcel request is nearby.', payload);
-      }
-    });
+    if (!nearbyDrivers.length) {
+      console.warn(`⚠️ No drivers found for parcel trip ${trip._id}`);
+      return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
+    }
 
-    console.log(`Parcel Trip: Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
-    res.status(200).json({ success: true, tripId: trip._id });
+    broadcastTripToDrivers(nearbyDrivers, payload, io);
+
+    console.log(`Parcel Trip created: ${trip._id}. Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
+    res.status(200).json({ success: true, tripId: trip._id, drivers: nearbyDrivers.length });
   } catch (err) {
     console.error('🔥 createParcelTrip error:', err);
+    if (req.body?.customerId) {
+      const customer = await findUserByIdOrPhone(req.body.customerId);
+      if (customer?.socketId) {
+        io.to(customer.socketId).emit('trip:error', { message: err.message });
+      }
+    }
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -148,9 +167,14 @@ const createLongTrip = async (req, res) => {
     drop.coordinates = normalizeCoordinates(drop.coordinates);
 
     const customer = await findUserByIdOrPhone(customerId);
-    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+    if (!customer) {
+      if (customer?.socketId) {
+        io.to(customer.socketId).emit('trip:error', { message: 'Customer not found' });
+      }
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
 
-    const radius = isSameDay ? RADIUS.LONG_SAME_DAY : RADIUS.LONG_ADVANCE;
+    const radius = isSameDay ? TRIP_LIMITS.LONG_SAME_DAY : TRIP_LIMITS.LONG_ADVANCE;
 
     const driverQuery = {
       isDriver: true,
@@ -180,44 +204,30 @@ const createLongTrip = async (req, res) => {
 
     const payload = {
       tripId: trip._id,
+      type: 'long',
       pickup,
       drop,
       vehicleType,
-      isSameDay,
-      tripDays,
-      returnTrip,
       customerId: customer._id,
-      type: 'long',
     };
 
-    if (isSameDay) {
-      drivers.forEach((driver) => {
-        if (driver.socketId) {
-          io.to(driver.socketId).emit('trip:request', payload);
-          io.to(driver.socketId).emit('longTripRequest', payload);
-        } else if (driver.fcmToken) {
-          sendToDriver(driver.fcmToken, 'New Long Trip', 'A same-day long trip is available nearby.', payload);
-        }
-      });
-    } else {
-      drivers.forEach((driver) => {
-        if (driver.fcmToken) {
-          sendToDriver(driver.fcmToken, 'New Advance Booking', 'You have a new long trip request.', {
-            tripId: trip._id.toString(),
-            pickup,
-            drop,
-            vehicleType,
-            tripDays,
-            returnTrip,
-          });
-        }
-      });
+    if (!drivers.length) {
+      console.warn(`⚠️ No drivers found for long trip ${trip._id}`);
+      return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
     }
 
-    console.log(`Long Trip: Found ${drivers.length} drivers near pickup`, pickup.coordinates);
-    res.status(200).json({ success: true, tripId: trip._id });
+    broadcastTripToDrivers(drivers, payload, io);
+
+    console.log(`Long Trip created: ${trip._id}. Found ${drivers.length} drivers near pickup`, pickup.coordinates);
+    res.status(200).json({ success: true, tripId: trip._id, drivers: drivers.length });
   } catch (err) {
     console.error('🔥 Error in createLongTrip:', err);
+    if (req.body?.customerId) {
+      const customer = await findUserByIdOrPhone(req.body.customerId);
+      if (customer?.socketId) {
+        io.to(customer.socketId).emit('trip:error', { message: err.message });
+      }
+    }
     res.status(500).json({ success: false, message: err.message });
   }
 };
