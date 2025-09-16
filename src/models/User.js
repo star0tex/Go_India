@@ -79,6 +79,11 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    firebaseUid: {
+    type: String,
+    unique: true,
+    sparse: true // Allows null values but ensures uniqueness for non-null values
+  },
 
     // 🔔 Notifications
     fcmToken: {

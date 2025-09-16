@@ -2,6 +2,9 @@
 import admin from "../utils/firebase.js";
 
 // Protect normal users
+// src/middlewares/authMiddleware.js
+import User from "../models/User.js";
+
 export const protect = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -18,11 +21,21 @@ export const protect = async (req, res, next) => {
 
     console.log("🔐 Token verified for:", decodedToken.phone_number);
 
- req.user = {
+    // ✅ find MongoDB user
+    const phone = decodedToken.phone_number.replace("+91", "").slice(-10);
+    const user = await User.findOne({ phone });
+
+    if (!user) {
+      return res.status(401).json({ message: "User not found in DB" });
+    }
+
+    req.user = {
       ...decodedToken,
-      id: decodedToken.uid, // ✅ Add this
+      id: user._id,   // ✅ attach MongoDB _id, not Firebase UID
+      role: user.role,
     };
-        next();
+
+    next();
   } catch (error) {
     return res.status(401).json({
       message: "Token invalid or expired",
@@ -30,7 +43,24 @@ export const protect = async (req, res, next) => {
     });
   }
 };
+export const verifyFirebaseToken = async (req, res, next) => {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Missing Authorization header" });
+  }
 
+  const token = header.split(" ")[1];
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.user = decoded; // 🔑 attach decoded Firebase user
+    next();
+  } catch (err) {
+    return res.status(401).json({
+      message: "Invalid Firebase token",
+      error: err.message,
+    });
+  }
+};
 // Restrict access to only admin users
 export const adminOnly = (req, res, next) => {
   try {

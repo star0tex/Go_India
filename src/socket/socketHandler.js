@@ -1,3 +1,4 @@
+// src/socket/socketHandler.js
 import { Server } from 'socket.io';
 import User from '../models/User.js';
 import Trip from '../models/Trip.js';
@@ -36,10 +37,12 @@ const resolveUserByIdOrPhone = async (idOrPhone) => {
   }
 };
 
+// Relaxed validation: don't require vehicleType here.
+// Controllers will ensure defaults if missing.
 const validateTripPayload = (payload) => {
   if (!payload || typeof payload !== 'object') return false;
-  const { type, customerId, pickup, drop, vehicleType } = payload;
-  if (!type || !customerId || !pickup || !drop || !vehicleType) return false;
+  const { type, customerId, pickup, drop } = payload;
+  if (!type || !customerId || !pickup || !drop) return false;
   if (!pickup.coordinates || !Array.isArray(pickup.coordinates) || pickup.coordinates.length !== 2) return false;
   if (!drop.coordinates || !Array.isArray(drop.coordinates) || drop.coordinates.length !== 2) return false;
   return true;
@@ -56,7 +59,7 @@ export const initSocket = (httpServer) => {
     /**
      * 🔹 Driver status update
      */
-    socket.on('updateDriverStatus', async ({ driverId, isOnline, location }) => {
+    socket.on('updateDriverStatus', async ({ driverId, isOnline, location, fcmToken, vehicleType }) => {
       try {
         if (!driverId) return;
 
@@ -82,9 +85,13 @@ export const initSocket = (httpServer) => {
           };
         }
 
-        await User.findByIdAndUpdate(user._id, updateData);
+        // Optionally update fcmToken and vehicleType if provided
+        if (fcmToken) updateData.fcmToken = fcmToken;
+        if (vehicleType) updateData.vehicleType = vehicleType;
+
+        await User.findByIdAndUpdate(user._id, updateData, { lean: true });
         connectedDrivers.set(socket.id, user._id.toString());
-        console.log(`📶 Driver ${user._id} is now ${isOnline ? 'online' : 'offline'}`);
+        console.log(`📶 Driver ${user._id} is now ${isOnline ? 'online' : 'offline'}. socketId saved.`);
       } catch (e) {
         emitTripError({ socket, message: 'Failed to update driver status.' });
         console.error('❌ updateDriverStatus error:', e);
@@ -118,7 +125,7 @@ export const initSocket = (httpServer) => {
      */
     socket.on('customer:request_trip', async (payload) => {
       try {
-        // Strict payload validation
+        // Strict payload validation (vehicleType optional)
         if (!validateTripPayload(payload)) {
           emitTripError({ socket, message: 'Invalid trip request payload.' });
           return;
@@ -289,3 +296,4 @@ export const initSocket = (httpServer) => {
 
   console.log('🚀 Socket.IO initialized');
 };
+export { io, connectedDrivers, connectedCustomers };

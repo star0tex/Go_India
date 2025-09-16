@@ -44,7 +44,7 @@ app.use('/api/rates', rateRoutes);
 app.use('/api', rideHistoryRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/trips', tripRoutes);
+app.use('/api/trip', tripRoutes);
 
 // ✅ Socket.IO Init
 initSocket(httpServer);

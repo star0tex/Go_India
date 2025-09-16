@@ -1,56 +1,40 @@
+// src/controllers/documentController.js
 import path from "path";
 import { fileURLToPath } from "url";
-import DriverDoc from "../models/DriverDoc.js";
+import DriverDoc from "../models/DriverDoc.js"; // correct model
 import requiredDocs from "../utils/requiredDocs.js";
+import User from "../models/User.js"; // ✅ make sure this is at the top
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+console.log("📄 documentController loaded"); // debug: confirm file loaded
+
 /**
- * @desc    Upload driver document (DL, Aadhaar, PAN, etc.)
- * @route   POST /api/driver/uploadDocument
- * @access  Private (Driver)
- * @notes   Frontend handles OCR using Google ML Kit and sends extracted text
+ * Upload driver document (DL, Aadhaar, PAN, etc.)
+ * POST /api/driver/uploadDocument
  */
 export const uploadDriverDocument = async (req, res) => {
   try {
-    const userId = req.user.id; // Set by protect middleware
-    const file = req.file;
+const userId = String(req.user.id);
     const { docType, vehicleType, extractedData } = req.body;
 
-     // 🔍 Add this block for debugging
-    console.log("docType:", docType);
-    console.log("vehicleType:", vehicleType);
-    console.log("extractedData:", extractedData);
-    console.log("file received:", file?.originalname || "No file");
-
-
-    if (!file) {
-      return res.status(400).json({ message: "No file uploaded." });
-    }
+    if (!file) return res.status(400).json({ message: "No file uploaded." });
 
     if (!docType || !vehicleType || !extractedData) {
-      return res.status(400).json({
-        message: "docType, vehicleType, and extractedData are required.",
-      });
+      return res.status(400).json({ message: "docType, vehicleType, extractedData required" });
     }
 
-    // ✅ Validate docType against vehicleType
-    const allowedDocs = requiredDocs[vehicleType];
-    console.log("allowedDocs for vehicleType:", vehicleType, "=>", allowedDocs);
-
-    if (!allowedDocs || !allowedDocs.includes(docType)) {
-      return res.status(400).json({
-        message: `Document type '${docType}' is not required for vehicle type '${vehicleType}'.`,
-      });
+    const allowedDocs = requiredDocs[vehicleType] || [];
+    if (!allowedDocs.includes(docType)) {
+      return res.status(400).json({ message: `Invalid docType for ${vehicleType}` });
     }
 
-    // ✅ Save document metadata
     const newDoc = new DriverDoc({
-      userId,
+      userId, // ✅ correct link to User
       docType,
-      url: file.path, // Stored locally in uploads/documents/
-      status: "pending", // Initial status
+      url: file.path,
+      status: "pending",
       remarks: "",
       extractedData,
     });
@@ -58,11 +42,60 @@ export const uploadDriverDocument = async (req, res) => {
     await newDoc.save();
 
     res.status(200).json({
-      message: `${docType} uploaded and saved successfully.`,
+      message: `${docType} uploaded successfully`,
       document: newDoc,
     });
-  } catch (error) {
-    console.error("Error uploading driver document:", error);
-    res.status(500).json({ message: "Server error while uploading document." });
+  } catch (err) {
+    console.error("❌ Error uploading driver document:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+};
+
+/**
+ * Get all documents for a driver
+ * GET /api/driver/documents/:driverId
+ */
+// In documentController.js
+// src/controllers/documentController.js
+export const getDriverDocuments = async (req, res) => {
+  const { driverId } = req.params;
+
+  try {
+    // 🔥 Correct model name (DriverDoc not DriverDocument)
+    const docs = await DriverDoc.find({ userId: driverId }).lean();
+
+    if (!docs || docs.length === 0) {
+      return res.status(200).json({ message: "No documents found for this driver.", docs: [] });
+    }
+
+    res.status(200).json({ docs });
+  } catch (err) {
+    console.error("❌ Error fetching driver documents:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+};
+
+
+/**
+ * @desc    Get driver details by ID
+ * @route   GET /api/driver/:driverId
+ * @access  Private (Driver)
+ */
+export const getDriverById = async (req, res) => {
+  try {
+    const { driverId } = req.params;
+
+    const driver = await User.findById(driverId).lean();
+
+    if (!driver) {
+      return res.status(404).json({ message: "Driver not found" });
+    }
+
+    res.status(200).json(driver);
+  } catch (err) {
+    res.status(500).json({
+      message: "Error fetching driver details",
+      error: err.message,
+    });
   }
 };

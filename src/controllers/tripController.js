@@ -1,12 +1,12 @@
+//
 import Trip from '../models/Trip.js';
 import User from '../models/User.js';
 import { sendToCustomer } from '../utils/fcmSender.js';
 import { io } from '../socket/socketHandler.js';
 import { reassignStandbyDriver } from './standbyController.js';
 import mongoose from 'mongoose';
-import { broadcastTripToDrivers } from '../utils/tripBroadcaster.js';
+import { broadcastToDrivers } from '../utils/tripBroadcaster.js';
 import { TRIP_LIMITS } from '../config/tripConfig.js';
-
 function normalizeCoordinates(coords) {
   if (!Array.isArray(coords) || coords.length !== 2) {
     throw new Error('Coordinates must be [lat, lng] or [lng, lat]');
@@ -26,12 +26,19 @@ const findUserByIdOrPhone = async (idOrPhone) => {
   }
   return await User.findOne({ phone: idOrPhone });
 };
+// --- only the changed parts shown ---
+// at top keep your imports as-is
 
 const createShortTrip = async (req, res) => {
   try {
-    const { customerId, pickup, drop, vehicleType } = req.body;
+    const incomingVehicleType = req.body?.vehicleType;
+    // normalize coordinates as you did
+    const { customerId, pickup, drop } = req.body;
     pickup.coordinates = normalizeCoordinates(pickup.coordinates);
     drop.coordinates = normalizeCoordinates(drop.coordinates);
+
+    // Ensure vehicleType is a non-empty lower-case string, default to 'car'
+    const vehicleType = (incomingVehicleType || '').toString().trim().toLowerCase() || 'car';
 
     const customer = await findUserByIdOrPhone(customerId);
     if (!customer) {
@@ -41,9 +48,10 @@ const createShortTrip = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
+    // use normalized vehicleType in the driver query
     const nearbyDrivers = await User.find({
       isDriver: true,
-      vehicleType,
+      vehicleType, // use normalized
       isOnline: true,
       location: {
         $near: {
@@ -57,18 +65,28 @@ const createShortTrip = async (req, res) => {
       customerId: customer._id,
       pickup,
       drop,
-      vehicleType,
+      vehicleType, // save normalized
       type: 'short',
       status: 'requested',
     });
 
     const payload = {
-      tripId: trip._id,
-      type: 'short',
-      pickup,
-      drop,
-      vehicleType,
-      customerId: customer._id,
+      tripId: trip._id.toString(),
+      type: trip.type,
+      vehicleType: vehicleType, // normalized string
+      customerId: customer._id.toString(),
+      pickup: {
+        lat: pickup.coordinates[1],
+        lng: pickup.coordinates[0],
+        address: pickup.address || "Pickup Location",
+      },
+      drop: {
+        lat: drop.coordinates[1],
+        lng: drop.coordinates[0],
+        address: drop.address || "Drop Location",
+      },
+      fare: trip.fare || 0,
+      paymentMethod: trip.paymentMethod || "Cash",
     };
 
     if (!nearbyDrivers.length) {
@@ -76,12 +94,13 @@ const createShortTrip = async (req, res) => {
       return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
     }
 
-    broadcastTripToDrivers(nearbyDrivers, payload, io);
+    broadcastToDrivers(nearbyDrivers, payload);
 
     console.log(`Short Trip created: ${trip._id}. Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
     res.status(200).json({ success: true, tripId: trip._id, drivers: nearbyDrivers.length });
   } catch (err) {
     console.error('🔥 createShortTrip error:', err);
+    // error handling as before
     if (req.body?.customerId) {
       const customer = await findUserByIdOrPhone(req.body.customerId);
       if (customer?.socketId) {
@@ -128,21 +147,32 @@ const createParcelTrip = async (req, res) => {
       status: 'requested',
     });
 
-    const payload = {
-      tripId: trip._id,
-      type: 'parcel',
-      pickup,
-      drop,
-      vehicleType,
-      customerId: customer._id,
-    };
+   const payload = {
+  tripId: trip._id.toString(),
+  type: trip.type,   // "short" / "parcel" / "long"
+  vehicleType: trip.vehicleType,
+  customerId: customer._id.toString(),
+  pickup: {
+    lat: pickup.coordinates[1],
+    lng: pickup.coordinates[0],
+    address: pickup.address || "Pickup Location",
+  },
+  drop: {
+    lat: drop.coordinates[1],
+    lng: drop.coordinates[0],
+    address: drop.address || "Drop Location",
+  },
+  fare: trip.fare || 0,
+  paymentMethod: trip.paymentMethod || "Cash",
+};
+done 
 
     if (!nearbyDrivers.length) {
       console.warn(`⚠️ No drivers found for parcel trip ${trip._id}`);
       return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
     }
 
-    broadcastTripToDrivers(nearbyDrivers, payload, io);
+    broadcastToDrivers(nearbyDrivers, payload, io);
 
     console.log(`Parcel Trip created: ${trip._id}. Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
     res.status(200).json({ success: true, tripId: trip._id, drivers: nearbyDrivers.length });
@@ -202,21 +232,31 @@ const createLongTrip = async (req, res) => {
       tripDays,
     });
 
-    const payload = {
-      tripId: trip._id,
-      type: 'long',
-      pickup,
-      drop,
-      vehicleType,
-      customerId: customer._id,
-    };
+  const payload = {
+  tripId: trip._id.toString(),
+  type: trip.type,   // "short" / "parcel" / "long"
+  vehicleType: trip.vehicleType,
+  customerId: customer._id.toString(),
+  pickup: {
+    lat: pickup.coordinates[1],
+    lng: pickup.coordinates[0],
+    address: pickup.address || "Pickup Location",
+  },
+  drop: {
+    lat: drop.coordinates[1],
+    lng: drop.coordinates[0],
+    address: drop.address || "Drop Location",
+  },
+  fare: trip.fare || 0,
+  paymentMethod: trip.paymentMethod || "Cash",
+};
 
     if (!drivers.length) {
       console.warn(`⚠️ No drivers found for long trip ${trip._id}`);
       return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
     }
 
-    broadcastTripToDrivers(drivers, payload, io);
+    broadcastToDrivers(drivers, payload, io);
 
     console.log(`Long Trip created: ${trip._id}. Found ${drivers.length} drivers near pickup`, pickup.coordinates);
     res.status(200).json({ success: true, tripId: trip._id, drivers: drivers.length });
