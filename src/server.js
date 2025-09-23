@@ -5,7 +5,7 @@ import morgan from 'morgan';
 import dotenv from 'dotenv';
 import { createServer } from 'http';
 import connectDB from './config/db.js';
-
+import { Server } from "socket.io";
 import userRoutes from './routes/userRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import driverRoutes from './routes/driverRoutes.js';
@@ -24,7 +24,15 @@ await connectDB();
 
 const app = express();
 const httpServer = createServer(app);
+const io = new Server(httpServer, {   // ✅ use httpServer, not server
+  cors: { origin: "*" },
+});
 
+// middleware to attach io in every request
+app.use((req, res, next) => {
+  req.io = io;
+  next();
+});
 app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
@@ -33,6 +41,7 @@ app.use('/uploads', express.static('uploads'));
 app.get('/', (_req, res) => {
   res.send('🌍 Go India backend live 🚀');
 });
+initSocket(io);
 
 // ✅ API Routes
 app.use('/api/user', userRoutes);
@@ -47,7 +56,6 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/trip', tripRoutes);
 
 // ✅ Socket.IO Init
-initSocket(httpServer);
 
 // ✅ Start Cron (every 2 minutes)
 setInterval(() => {
@@ -74,3 +82,4 @@ const PORT = process.env.PORT || 5002;
 httpServer.listen(PORT, () =>
   console.log(`🚀 Go India server running on port ${PORT}`)
 );
+export { io, httpServer };

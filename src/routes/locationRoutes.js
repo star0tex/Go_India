@@ -14,7 +14,7 @@ const router = express.Router();
  * @route   POST /api/location/update/driver
  * @desc    Update live driver GPS location
  */
-router.post('/update/driver', updateDriverLocation);
+router.post('/updateDriver', updateDriverLocation);
 
 /**
  * @route   POST /api/location/update/customer
@@ -32,6 +32,6 @@ router.get('/driver/:id', getDriverLocation);
  * @route   GET /api/location/customer/:id
  * @desc    Get current customer location by customerId
  */
-router.get('/customer/:id', getCustomerLocation);
+router.get('/customer/:id', getCustomerLocation); // ✅ Only this one!
 
 export default router;

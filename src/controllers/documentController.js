@@ -16,24 +16,33 @@ console.log("📄 documentController loaded"); // debug: confirm file loaded
  */
 export const uploadDriverDocument = async (req, res) => {
   try {
-const userId = String(req.user.id);
-    const { docType, vehicleType, extractedData } = req.body;
+    const userId = String(req.user.id);
+    const { docType, vehicleType, extractedData, docSide } = req.body;
 
-    if (!file) return res.status(400).json({ message: "No file uploaded." });
+    // 🔑 Fix: Multer puts file into req.file
+    if (!req.file) {
+      return res.status(400).json({ message: "No file uploaded." });
+    }
+    const file = req.file;
 
     if (!docType || !vehicleType || !extractedData) {
-      return res.status(400).json({ message: "docType, vehicleType, extractedData required" });
+      return res
+        .status(400)
+        .json({ message: "docType, vehicleType, extractedData required" });
     }
 
-    const allowedDocs = requiredDocs[vehicleType] || [];
-    if (!allowedDocs.includes(docType)) {
-      return res.status(400).json({ message: `Invalid docType for ${vehicleType}` });
+    const allowedDocs = requiredDocs[vehicleType.toLowerCase()] || [];
+    if (!allowedDocs.includes(docType.toLowerCase())) {
+      return res
+        .status(400)
+        .json({ message: `Invalid docType for ${vehicleType}` });
     }
 
     const newDoc = new DriverDoc({
       userId, // ✅ correct link to User
       docType,
-      url: file.path,
+      side: docSide || "front", // optional, default front
+      url: file.path, // ✅ multer saved path
       status: "pending",
       remarks: "",
       extractedData,
@@ -50,7 +59,6 @@ const userId = String(req.user.id);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
-
 /**
  * Get all documents for a driver
  * GET /api/driver/documents/:driverId

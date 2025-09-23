@@ -48,4 +48,30 @@ router.post('/:id/reject', rejectTrip);
  */
 router.get('/:id', getTripById);
 
+// Add this to your tripRoutes.js for debugging
+router.get('/debug/drivers', async (req, res) => {
+  try {
+    const { lat, lng, maxDistance = 10000, vehicleType = 'bike' } = req.query;
+    
+    const drivers = await User.find({
+      isDriver: true,
+      vehicleType,
+      isOnline: true,
+      location: {
+        $near: {
+          $geometry: { 
+            type: 'Point', 
+            coordinates: [parseFloat(lng), parseFloat(lat)] 
+          },
+          $maxDistance: parseInt(maxDistance),
+        },
+      },
+    }).select('name phone vehicleType location isOnline');
+
+    res.json({ success: true, drivers });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 export default router;

@@ -1,21 +1,19 @@
-//
+// src/controllers/tripController.js
 import Trip from '../models/Trip.js';
 import User from '../models/User.js';
-import { sendToCustomer } from '../utils/fcmSender.js';
 import { io } from '../socket/socketHandler.js';
-import { reassignStandbyDriver } from './standbyController.js';
-import mongoose from 'mongoose';
 import { broadcastToDrivers } from '../utils/tripBroadcaster.js';
 import { TRIP_LIMITS } from '../config/tripConfig.js';
+
 function normalizeCoordinates(coords) {
   if (!Array.isArray(coords) || coords.length !== 2) {
     throw new Error('Coordinates must be [lat, lng] or [lng, lat]');
   }
   const [a, b] = coords.map(Number);
-  if (Math.abs(a) <= 90 && Math.abs(b) <= 180) {
-    return [b, a];
+  if (Math.abs(a) <= 90 && Math.abs(b) > 90) {
+    return [b, a]; // It's [lat, lng], swap to [lng, lat]
   }
-  return [a, b];
+  return [a, b]; // It's already [lng, lat] or invalid, do not swap
 }
 
 const findUserByIdOrPhone = async (idOrPhone) => {
@@ -26,46 +24,47 @@ const findUserByIdOrPhone = async (idOrPhone) => {
   }
   return await User.findOne({ phone: idOrPhone });
 };
-// --- only the changed parts shown ---
-// at top keep your imports as-is
 
 const createShortTrip = async (req, res) => {
   try {
-    const incomingVehicleType = req.body?.vehicleType;
-    // normalize coordinates as you did
-    const { customerId, pickup, drop } = req.body;
+    const { customerId, pickup, drop, vehicleType } = req.body;
+
+    if (!vehicleType || typeof vehicleType !== 'string' || vehicleType.trim() === '') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Vehicle type is required and must be a non-empty string.' 
+      });
+    }
+
     pickup.coordinates = normalizeCoordinates(pickup.coordinates);
     drop.coordinates = normalizeCoordinates(drop.coordinates);
-
-    // Ensure vehicleType is a non-empty lower-case string, default to 'car'
-    const vehicleType = (incomingVehicleType || '').toString().trim().toLowerCase() || 'car';
+    
+    const sanitizedVehicleType = vehicleType.trim().toLowerCase();
 
     const customer = await findUserByIdOrPhone(customerId);
     if (!customer) {
-      if (customer?.socketId) {
-        io.to(customer.socketId).emit('trip:error', { message: 'Customer not found' });
-      }
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
-    // use normalized vehicleType in the driver query
     const nearbyDrivers = await User.find({
       isDriver: true,
-      vehicleType, // use normalized
+      vehicleType: sanitizedVehicleType,
       isOnline: true,
       location: {
         $near: {
           $geometry: { type: 'Point', coordinates: pickup.coordinates },
-          $maxDistance: TRIP_LIMITS.SHORT,
+          $maxDistance: TRIP_LIMITS.SHORT || 10000,
         },
       },
-    });
+    })
+    .select('name phone vehicleType location isOnline socketId fcmToken')
+    .lean();
 
     const trip = await Trip.create({
       customerId: customer._id,
       pickup,
       drop,
-      vehicleType, // save normalized
+      vehicleType: sanitizedVehicleType,
       type: 'short',
       status: 'requested',
     });
@@ -73,7 +72,80 @@ const createShortTrip = async (req, res) => {
     const payload = {
       tripId: trip._id.toString(),
       type: trip.type,
-      vehicleType: vehicleType, // normalized string
+      vehicleType: sanitizedVehicleType,
+      customerId: customer._id.toString(),
+      pickup: {
+        lat: pickup.coordinates[1],
+        lng: pickup.coordinates[0],
+        address: pickup.address || "Pickup Location",
+      },
+      drop: {
+        lat: drop.coordinates[1],
+        lng: drop.coordinates[0],
+        address: drop.address || "Drop Location",
+      },
+      fare: req.body.fare || 0,
+    };
+
+    if (!nearbyDrivers.length) {
+      console.warn(`⚠️ No '${sanitizedVehicleType}' drivers found for short trip ${trip._id}`);
+      return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
+    }
+
+    broadcastToDrivers(nearbyDrivers, payload);
+    console.log(`Short Trip created: ${trip._id}. Found ${nearbyDrivers.length} '${sanitizedVehicleType}' drivers.`);
+    res.status(200).json({ success: true, tripId: trip._id, drivers: nearbyDrivers.length });
+    
+  } catch (err) {
+    console.error('🔥 createShortTrip error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+const createParcelTrip = async (req, res) => {
+  try {
+    const { customerId, pickup, drop, vehicleType, parcelDetails, fare } = req.body;
+    const sanitizedVehicleType = (vehicleType || 'bike').toString().trim().toLowerCase();
+
+    if (!pickup?.coordinates || !drop?.coordinates) {
+      return res.status(400).json({ success: false, message: 'Pickup and drop coordinates are required' });
+    }
+
+    pickup.coordinates = normalizeCoordinates(pickup.coordinates);
+    drop.coordinates = normalizeCoordinates(drop.coordinates);
+
+    const customer = await findUserByIdOrPhone(customerId);
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+
+    const nearbyDrivers = await User.find({
+      isDriver: true,
+      vehicleType: sanitizedVehicleType,
+      isOnline: true,
+      location: {
+        $near: {
+          $geometry: { type: 'Point', coordinates: pickup.coordinates },
+          $maxDistance: TRIP_LIMITS.PARCEL || 10000,
+        },
+      },
+    }).select('name phone vehicleType location isOnline socketId fcmToken').lean();
+
+    const trip = await Trip.create({
+      customerId: customer._id,
+      pickup,
+      drop,
+      vehicleType: sanitizedVehicleType,
+      type: 'parcel',
+      parcelDetails,
+      status: 'requested',
+      fare: fare || 0,
+    });
+
+    const payload = {
+      tripId: trip._id.toString(),
+      type: trip.type,
+      vehicleType: sanitizedVehicleType,
       customerId: customer._id.toString(),
       pickup: {
         lat: pickup.coordinates[1],
@@ -86,111 +158,25 @@ const createShortTrip = async (req, res) => {
         address: drop.address || "Drop Location",
       },
       fare: trip.fare || 0,
-      paymentMethod: trip.paymentMethod || "Cash",
+      parcelDetails: trip.parcelDetails,
     };
-
-    if (!nearbyDrivers.length) {
-      console.warn(`⚠️ No drivers found for short trip ${trip._id}`);
-      return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
-    }
-
-    broadcastToDrivers(nearbyDrivers, payload);
-
-    console.log(`Short Trip created: ${trip._id}. Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
-    res.status(200).json({ success: true, tripId: trip._id, drivers: nearbyDrivers.length });
-  } catch (err) {
-    console.error('🔥 createShortTrip error:', err);
-    // error handling as before
-    if (req.body?.customerId) {
-      const customer = await findUserByIdOrPhone(req.body.customerId);
-      if (customer?.socketId) {
-        io.to(customer.socketId).emit('trip:error', { message: err.message });
-      }
-    }
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-const createParcelTrip = async (req, res) => {
-  try {
-    const { customerId, pickup, drop, vehicleType, parcelDetails } = req.body;
-    pickup.coordinates = normalizeCoordinates(pickup.coordinates);
-    drop.coordinates = normalizeCoordinates(drop.coordinates);
-
-    const customer = await findUserByIdOrPhone(customerId);
-    if (!customer) {
-      if (customer?.socketId) {
-        io.to(customer.socketId).emit('trip:error', { message: 'Customer not found' });
-      }
-      return res.status(404).json({ success: false, message: 'Customer not found' });
-    }
-
-    const nearbyDrivers = await User.find({
-      isDriver: true,
-      vehicleType,
-      isOnline: true,
-      location: {
-        $near: {
-          $geometry: { type: 'Point', coordinates: pickup.coordinates },
-          $maxDistance: TRIP_LIMITS.PARCEL,
-        },
-      },
-    });
-
-    const trip = await Trip.create({
-      customerId: customer._id,
-      pickup,
-      drop,
-      vehicleType,
-      type: 'parcel',
-      parcelDetails,
-      status: 'requested',
-    });
-
-   const payload = {
-  tripId: trip._id.toString(),
-  type: trip.type,   // "short" / "parcel" / "long"
-  vehicleType: trip.vehicleType,
-  customerId: customer._id.toString(),
-  pickup: {
-    lat: pickup.coordinates[1],
-    lng: pickup.coordinates[0],
-    address: pickup.address || "Pickup Location",
-  },
-  drop: {
-    lat: drop.coordinates[1],
-    lng: drop.coordinates[0],
-    address: drop.address || "Drop Location",
-  },
-  fare: trip.fare || 0,
-  paymentMethod: trip.paymentMethod || "Cash",
-};
-done 
 
     if (!nearbyDrivers.length) {
       console.warn(`⚠️ No drivers found for parcel trip ${trip._id}`);
       return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
     }
 
-    broadcastToDrivers(nearbyDrivers, payload, io);
-
-    console.log(`Parcel Trip created: ${trip._id}. Found ${nearbyDrivers.length} drivers near pickup`, pickup.coordinates);
+    broadcastToDrivers(nearbyDrivers, payload);
+    console.log(`📦 Parcel Trip created: ${trip._id}. Found ${nearbyDrivers.length} drivers.`);
     res.status(200).json({ success: true, tripId: trip._id, drivers: nearbyDrivers.length });
   } catch (err) {
     console.error('🔥 createParcelTrip error:', err);
-    if (req.body?.customerId) {
-      const customer = await findUserByIdOrPhone(req.body.customerId);
-      if (customer?.socketId) {
-        io.to(customer.socketId).emit('trip:error', { message: err.message });
-      }
-    }
     res.status(500).json({ success: false, message: err.message });
   }
 };
 
 const createLongTrip = async (req, res) => {
   try {
-    console.log('📦 Long trip request received:', req.body);
     const { customerId, pickup, drop, vehicleType, isSameDay, tripDays, returnTrip } = req.body;
 
     pickup.coordinates = normalizeCoordinates(pickup.coordinates);
@@ -198,9 +184,6 @@ const createLongTrip = async (req, res) => {
 
     const customer = await findUserByIdOrPhone(customerId);
     if (!customer) {
-      if (customer?.socketId) {
-        io.to(customer.socketId).emit('trip:error', { message: 'Customer not found' });
-      }
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
@@ -232,42 +215,34 @@ const createLongTrip = async (req, res) => {
       tripDays,
     });
 
-  const payload = {
-  tripId: trip._id.toString(),
-  type: trip.type,   // "short" / "parcel" / "long"
-  vehicleType: trip.vehicleType,
-  customerId: customer._id.toString(),
-  pickup: {
-    lat: pickup.coordinates[1],
-    lng: pickup.coordinates[0],
-    address: pickup.address || "Pickup Location",
-  },
-  drop: {
-    lat: drop.coordinates[1],
-    lng: drop.coordinates[0],
-    address: drop.address || "Drop Location",
-  },
-  fare: trip.fare || 0,
-  paymentMethod: trip.paymentMethod || "Cash",
-};
+    const payload = {
+      tripId: trip._id.toString(),
+      type: trip.type,
+      vehicleType: trip.vehicleType,
+      customerId: customer._id.toString(),
+      pickup: {
+        lat: pickup.coordinates[1],
+        lng: pickup.coordinates[0],
+        address: pickup.address || "Pickup Location",
+      },
+      drop: {
+        lat: drop.coordinates[1],
+        lng: drop.coordinates[0],
+        address: drop.address || "Drop Location",
+      },
+      fare: trip.fare || 0,
+    };
 
     if (!drivers.length) {
       console.warn(`⚠️ No drivers found for long trip ${trip._id}`);
       return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
     }
 
-    broadcastToDrivers(drivers, payload, io);
-
-    console.log(`Long Trip created: ${trip._id}. Found ${drivers.length} drivers near pickup`, pickup.coordinates);
+    broadcastToDrivers(drivers, payload);
+    console.log(`Long Trip created: ${trip._id}. Found ${drivers.length} drivers.`);
     res.status(200).json({ success: true, tripId: trip._id, drivers: drivers.length });
   } catch (err) {
     console.error('🔥 Error in createLongTrip:', err);
-    if (req.body?.customerId) {
-      const customer = await findUserByIdOrPhone(req.body.customerId);
-      if (customer?.socketId) {
-        io.to(customer.socketId).emit('trip:error', { message: err.message });
-      }
-    }
     res.status(500).json({ success: false, message: err.message });
   }
 };
@@ -275,40 +250,52 @@ const createLongTrip = async (req, res) => {
 const acceptTrip = async (req, res) => {
   try {
     const { driverId, tripId } = req.body;
-    const trip = await Trip.findById(tripId);
+
+    const trip = await Trip.findById(tripId).lean();
     if (!trip || trip.status !== 'requested') {
       return res.status(400).json({ success: false, message: 'Trip not available' });
     }
 
-    trip.assignedDriver = mongoose.Types.ObjectId(driverId);
-    trip.status = 'driver_assigned';
-    await trip.save();
+    const driver = await User.findById(driverId).select('name photoUrl rating vehicleBrand vehicleNumber location').lean();
+    if (!driver) {
+      return res.status(404).json({ success: false, message: 'Driver not found' });
+    }
 
-    const customer = await User.findById(trip.customerId);
+    const updatedTrip = await Trip.findByIdAndUpdate(
+      tripId,
+      { $set: { assignedDriver: driverId, status: 'driver_assigned' } },
+      { new: true }
+    ).lean();
+
+    const customer = await User.findById(trip.customerId).lean();
+
     if (customer?.socketId) {
-      io.to(customer.socketId).emit('trip:accepted', { tripId, driverId });
+      const payload = {
+        tripId: updatedTrip._id.toString(),
+        trip: {
+          pickup: { lat: updatedTrip.pickup.coordinates[1], lng: updatedTrip.pickup.coordinates[0], address: updatedTrip.pickup.address },
+          drop: { lat: updatedTrip.drop.coordinates[1], lng: updatedTrip.drop.coordinates[0], address: updatedTrip.drop.address },
+        },
+        driver: {
+          id: driver._id.toString(),
+          name: driver.name || 'N/A',
+          photoUrl: driver.photoUrl || null,
+          rating: driver.rating || 4.8,
+          vehicleBrand: driver.vehicleBrand || 'Bike',
+          vehicleNumber: driver.vehicleNumber || 'N/A',
+          location: { lat: driver.location.coordinates[1], lng: driver.location.coordinates[0] }
+        }
+      };
+      io.to(customer.socketId).emit('trip:accepted', payload);
     }
-    if (customer?.fcmToken) {
-      sendToCustomer(customer.fcmToken, 'Driver Accepted', 'A driver has accepted your ride request.', { tripId });
-    }
+    
+    res.status(200).json({ success: true, message: "Trip accepted successfully" });
 
-    const otherDrivers = await User.find({
-      isDriver: true,
-      _id: { $ne: driverId },
-    });
-    otherDrivers.forEach((driver) => {
-      if (driver.socketId) {
-        io.to(driver.socketId).emit('tripRejectedBySystem', { tripId });
-      }
-    });
-
-    res.status(200).json({ success: true });
   } catch (err) {
     console.error('🔥 acceptTrip error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
-
 const rejectTrip = async (req, res) => {
   try {
     const { tripId } = req.body;
