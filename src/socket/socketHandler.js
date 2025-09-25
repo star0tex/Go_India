@@ -7,7 +7,6 @@ import {
   createShortTrip,
   createParcelTrip,
   createLongTrip,
-    acceptTrip, // ✅ NEW: Import the acceptTrip controller
 
 } from '../controllers/tripController.js';
 import { emitTripError } from '../utils/errorEmitter.js';
@@ -60,48 +59,95 @@ export const initSocket = (ioInstance) => {
     // 🔹 Driver status update
    // in socketHandler.js
 
-socket.on('updateDriverStatus', async ({ driverId, isOnline, location, fcmToken, profileData }) => {
+// Replace your existing 'updateDriverStatus' handler with this:
+
+socket.on('updateDriverStatus', async (payload = {}) => {
   try {
+    const {
+      driverId,
+      isOnline,
+      location,   // optional: { coordinates: [lng, lat] }
+      lat,        // optional: number
+      lng,        // optional: number
+      fcmToken,
+      profileData,
+      vehicleType,
+    } = payload;
+
     if (!driverId) return;
 
-    const user = await resolveUserByIdOrPhone(driverId);
+    // Resolve user by _id or phone
+    const isObjectId = (val) => typeof val === 'string' && /^[0-9a-fA-F]{24}$/.test(val);
+    const user = isObjectId(driverId)
+      ? await User.findById(driverId)
+      : await User.findOne({ phone: driverId });
+
     if (!user) {
       console.warn(`updateDriverStatus: user not found for ${driverId}`);
       return;
     }
 
-    const updateData = { socketId: socket.id, isOnline: !!isOnline };
+    const set = {
+      socketId: socket.id,
+      isOnline: !!isOnline,
+    };
 
-    if (location?.coordinates) {
-      updateData.location = {
-        type: 'Point',
-        coordinates: location.coordinates, // [lng, lat]
-      };
+    // Location: accept either 'location.coordinates' or raw lat/lng
+    if (location?.coordinates?.length === 2) {
+      set.location = { type: 'Point', coordinates: location.coordinates }; // [lng, lat]
+    } else if (
+      typeof lat === 'number' &&
+      typeof lng === 'number' &&
+      !Number.isNaN(lat) &&
+      !Number.isNaN(lng)
+    ) {
+      set.location = { type: 'Point', coordinates: [lng, lat] };
     }
 
-    if (fcmToken) {
-      updateData.fcmToken = fcmToken;
-    }
-    
-    // ✅ NEW: If profileData is received from the driver's app, merge it into the update.
+    if (fcmToken) set.fcmToken = fcmToken;
+
+    // Only allow safe profile keys (exclude phone to avoid unique index collisions)
+    const allowedProfileKeys = [
+      'name',
+      'photoUrl',
+      'rating',
+      'vehicleBrand',
+      'vehicleNumber',
+      'vehicleType',
+    ];
+
     if (profileData && typeof profileData === 'object') {
-      // This will add fields like name, photoUrl, vehicleBrand, etc., to the update
-      Object.assign(updateData, profileData);
+      for (const key of allowedProfileKeys) {
+        if (profileData[key] !== undefined && profileData[key] !== null) {
+          set[key] =
+            key === 'vehicleType'
+              ? String(profileData[key]).toLowerCase().trim()
+              : profileData[key];
+        }
+      }
     }
 
-    // 🔷 MODIFIED: Use $set to safely update the document with new and existing fields.
-    await User.findByIdAndUpdate(user._id, { $set: updateData });
-    
+    // Also allow explicit vehicleType arg
+    if (vehicleType) {
+      set.vehicleType = String(vehicleType).toLowerCase().trim();
+    }
+
+    await User.findByIdAndUpdate(user._id, { $set: set }, { new: true });
+
+    // Track in memory map
     connectedDrivers.set(socket.id, user._id.toString());
-    console.log(`📶 Driver ${user._id} is now ${isOnline ? 'online' : 'offline'}. Profile updated.`);
-    
+
+    // Optional ack back to driver
+    socket.emit('driver:statusUpdated', { ok: true, isOnline: !!isOnline });
+
+    console.log(`📶 Driver ${user._id} is now ${isOnline ? 'online' : 'offline'}.`);
   } catch (e) {
     emitTripError({ socket, message: 'Failed to update driver status.' });
     console.error('❌ updateDriverStatus error:', e);
   }
-});
-    // 🔹 Customer register
+});    // 🔹 Customer register
    // In socketHandler.js - Fix customer:register handler
+// Fix the customer:register handler in socketHandler.js
 // Fix the customer:register handler in socketHandler.js
 // Fix the customer:register handler in socketHandler.js
 socket.on('customer:register', async ({ customerId }) => {
@@ -111,56 +157,73 @@ socket.on('customer:register', async ({ customerId }) => {
       socket.emit('customer:registered', { success: false, error: 'customerId missing' });
       return;
     }
-    
+
     console.log(`👤 Customer register request: ${customerId} on socket: ${socket.id}`);
-    
+
+    // Always resolve by DB ID or phone, but prefer DB ID for mapping
     const user = await resolveUserByIdOrPhone(customerId);
+
     if (!user) {
-      console.warn(`customer:register - user not found for ${customerId}, adding to connectedCustomers only`);
-      
-      // Add to connectedCustomers map
+      console.warn(`❌ customer:register - user not found for ${customerId}`);
+
+      // Only add to connectedCustomers map with the provided ID (should be DB ID from frontend)
       connectedCustomers.set(socket.id, customerId);
-      
-      socket.emit('customer:registered', { 
-        success: true, 
-        customerId, 
-        socketId: socket.id, 
-        note: 'user not in DB, using phone as ID' 
+
+      socket.emit('customer:registered', {
+        success: true,
+        customerId: customerId,
+        socketId: socket.id,
+        note: 'user not in DB, using provided ID'
       });
+      console.log(`📝 Added customer to map with provided ID: ${customerId}`);
       return;
     }
-    
-    // ✅ FIX: Remove old socket entries for this customer
+
+    // Remove any old socket entries for this customer (by DB ID or phone)
     for (const [existingSocketId, existingCustomerId] of connectedCustomers.entries()) {
-      if (existingCustomerId === user._id.toString()) {
+      if (
+        existingCustomerId === user._id.toString() ||
+        existingCustomerId === user.phone
+      ) {
         console.log(`🗑️ Removing old socket entry: ${existingSocketId} for customer ${existingCustomerId}`);
         connectedCustomers.delete(existingSocketId);
+
+        // Also update the database
+        await User.findByIdAndUpdate(user._id, {
+          $set: { socketId: null }
+        });
       }
     }
-    
-    // ✅ FIX: Update socketId in database
-    await User.findByIdAndUpdate(user._id, { 
-      $set: { socketId: socket.id } 
-    });
-    
-    // ✅ FIX: Add to connectedCustomers map with correct ID
+
+    // Update socketId in database
+    try {
+      await User.findByIdAndUpdate(user._id, {
+        $set: { socketId: socket.id }
+      });
+      console.log(`💾 Updated socketId in DB for customer ${user._id}`);
+    } catch (dbError) {
+      console.error('❌ Database update error:', dbError);
+    }
+
+    // Always map socket.id to DB customer ID
     connectedCustomers.set(socket.id, user._id.toString());
-    
-    console.log(`✅ Customer registered: ${user._id} with socketId: ${socket.id}`);
+
+    console.log(`✅ Customer registered: ${user._id} (phone: ${user.phone}) with socketId: ${socket.id}`);
     console.log(`📊 Connected customers: ${connectedCustomers.size}`);
-    
-    // Send confirmation to customer
-    socket.emit('customer:registered', { 
-      success: true, 
+
+    // Send confirmation to customer with DB ID
+    socket.emit('customer:registered', {
+      success: true,
       customerId: user._id.toString(),
-      socketId: socket.id 
+      socketId: socket.id,
+      dbId: user._id.toString()
     });
-    
+
   } catch (e) {
     console.error('❌ customer:register error:', e);
     socket.emit('customer:registered', { success: false, error: e.message });
   }
-});    socket.on('customer:request_trip', async (payload) => {
+});   socket.on('customer:request_trip', async (payload) => {
       try {
         if (!validateTripPayload(payload)) {
           emitTripError({ socket, message: 'Invalid trip request payload.' });
@@ -203,49 +266,75 @@ socket.on('customer:register', async ({ customerId }) => {
     // 🔹 Driver accepts trip
    // 🔹 Driver accepts trip
 // In socketHandler.js - Fix the driver:accept_trip handler
+// In socketHandler.js - Improve the customer lookup in driver:accept_trip
+// 🔹 Driver accepts trip
+// Utility to normalize phone numbers (digits only)
+const normalizePhone = (phone) => {
+  if (!phone) return null;
+  return String(phone).replace(/[^0-9]/g, ""); // remove +, spaces, dashes
+};
+
+// 🔹 Driver accepts trip
 socket.on('driver:accept_trip', async ({ tripId, driverId }) => {
   try {
     console.log(`🚗 Driver ${driverId} accepting trip ${tripId}`);
-    
+
     const trip = await Trip.findById(tripId).lean();
     if (!trip || trip.status !== 'requested') {
       emitTripError({ socket, tripId, message: 'Trip not available' });
       return;
     }
 
-    // GET COMPLETE DRIVER PROFILE - This was missing!
-    const driver = await User.findById(driverId).select(
-      'name photoUrl rating vehicleBrand vehicleNumber location phone'
-    ).lean();
-    
+    const driver = await User.findById(driverId)
+      .select('name photoUrl rating vehicleBrand vehicleNumber location')
+      .lean();
     if (!driver) {
       emitTripError({ socket, tripId, message: 'Driver not found' });
       return;
     }
 
-    // Update trip status
-    await Trip.findByIdAndUpdate(
-      tripId,
-      { $set: { assignedDriver: driverId, status: 'driver_assigned' } }
-    );
+    // Update trip with assigned driver
+    await Trip.findByIdAndUpdate(tripId, {
+      $set: { assignedDriver: driverId, status: 'driver_assigned' },
+    });
 
-    // Find customer socket
-    const customer = await User.findById(trip.customerId).select('socketId name phone').lean();
-    let customerSocketId = customer?.socketId;
-    
-    // Fallback: search in connectedCustomers map
-    if (!customerSocketId) {
-      for (const [socketId, custId] of connectedCustomers.entries()) {
-        if (custId === trip.customerId.toString()) {
-          customerSocketId = socketId;
-          break;
-        }
+    // ✅ Look up customer (by id and phone)
+    let customerSocketId = null;
+    const customerDoc = await User.findById(trip.customerId).select('phone socketId').lean();
+    const dbPhone = normalizePhone(customerDoc?.phone);
+
+    console.log("📊 connectedCustomers dump:", Array.from(connectedCustomers.entries()));
+    console.log("🔎 Trip customerId:", trip.customerId.toString());
+    console.log("🔎 Customer phone from DB:", customerDoc?.phone, "→", dbPhone);
+
+    for (const [socketId, custId] of connectedCustomers.entries()) {
+      const normalized = normalizePhone(custId);
+
+      if (
+        custId === trip.customerId.toString() ||   // exact _id match
+        (dbPhone && normalized === dbPhone)        // normalized phone match
+      ) {
+        customerSocketId = socketId;
+        console.log(`✅ Found customer socket: ${socketId} (custId: ${custId})`);
+        break;
       }
     }
 
     if (customerSocketId) {
       const payload = {
         tripId: tripId.toString(),
+        trip: {
+          pickup: {
+            lat: trip.pickup.coordinates[1],
+            lng: trip.pickup.coordinates[0],
+            address: trip.pickup.address || "Pickup Location",
+          },
+          drop: {
+            lat: trip.drop.coordinates[1],
+            lng: trip.drop.coordinates[0],
+            address: trip.drop.address || "Drop Location",
+          },
+        },
         driver: {
           id: driver._id.toString(),
           name: driver.name || 'Driver',
@@ -253,36 +342,25 @@ socket.on('driver:accept_trip', async ({ tripId, driverId }) => {
           rating: driver.rating || 4.8,
           vehicleBrand: driver.vehicleBrand || 'Vehicle',
           vehicleNumber: driver.vehicleNumber || 'N/A',
-          phone: driver.phone || null,
-          location: driver.location ? {
+          location: {
             lat: driver.location.coordinates[1],
-            lng: driver.location.coordinates[0]
-          } : null
-        },
-        trip: {
-          pickup: { 
-            lat: trip.pickup.coordinates[1], 
-            lng: trip.pickup.coordinates[0], 
-            address: trip.pickup.address || "Pickup Location"
+            lng: driver.location.coordinates[0],
           },
-          drop: { 
-            lat: trip.drop.coordinates[1], 
-            lng: trip.drop.coordinates[0], 
-            address: trip.drop.address || "Drop Location"
-          }
-        }
+        },
       };
-      
-      // Emit to customer
-      io.to(customerSocketId).emit('trip:accepted', payload);
-      console.log(`📢 Trip acceptance sent with driver details: ${JSON.stringify(payload.driver)}`);
-    }
 
+      io.to(customerSocketId).emit('trip:accepted', payload);
+      console.log(`📢 trip:accepted emitted to customer ${trip.customerId}`);
+    } else {
+      console.log(`❌ No socketId found for customer ${trip.customerId}`);
+      console.log(`💡 Customer might be offline, send push notification.`);
+    }
   } catch (e) {
     console.error('❌ driver:accept_trip error:', e);
     emitTripError({ socket, tripId, message: 'Failed to accept trip.' });
   }
-});// In the disconnect handler, add cleanup
+});
+
 socket.on('disconnect', async () => {
   try {
     const driverId = connectedDrivers.get(socket.id);
