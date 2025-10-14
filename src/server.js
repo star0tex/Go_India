@@ -18,6 +18,7 @@ import adminRoutes from './routes/adminRoutes.js';
 import tripRoutes from './routes/tripRoutes.js';
 import standbyReassignCron from './cron/standbyReassignCron.js';
 import { initSocket } from './socket/socketHandler.js';
+import walletRoutes from './routes/walletRoutes.js'; // 👈 1. IMPORT THE NEW FILE
 
 dotenv.config();
 await connectDB();
@@ -54,6 +55,7 @@ app.use('/api', rideHistoryRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/trip', tripRoutes);
+app.use('/api/wallet', walletRoutes); // 👈 2. ADD THIS LINE
 
 // ✅ Socket.IO Init
 

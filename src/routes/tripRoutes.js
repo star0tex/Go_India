@@ -7,8 +7,13 @@ import {
   createLongTrip,
   acceptTrip,
   rejectTrip,
+  completeTrip,
+  cancelTrip,
   getTripById,
-} from '../controllers/tripController.js';
+  goingToPickup,
+  startRide,
+  completeRideWithVerification,
+  confirmCashCollection,} from '../controllers/tripController.js';
 
 const router = express.Router();
 
@@ -41,12 +46,17 @@ router.post('/:id/accept', acceptTrip);
  * @desc    Driver rejects the trip
  */
 router.post('/:id/reject', rejectTrip);
-
+router.post('/complete', completeTrip);
+router.post('/cancel', cancelTrip);
 /**
  * @route   GET /api/trips/:id
  * @desc    Get trip details by ID
  */
 router.get('/:id', getTripById);
+router.post('/going-to-pickup', goingToPickup);
+router.post('/start-ride', startRide);
+router.post('/complete-ride', completeRideWithVerification);
+router.post('/confirm-cash', confirmCashCollection);
 
 // Add this to your tripRoutes.js for debugging
 router.get('/debug/drivers', async (req, res) => {

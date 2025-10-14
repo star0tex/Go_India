@@ -1,15 +1,14 @@
-// routes/authRoutes.js
-import express from "express";
-import { firebaseLogin } from "../controllers/authController.js";
-import { verifyFirebaseToken } from "../middlewares/authMiddleware.js";
+// src/routes/authRoutes.js
+import express from 'express';
+import { firebaseLogin, sendOTP, verifyOTPAndLogin } from '../controllers/authController.js';
 
 const router = express.Router();
 
-/**
- * @route   POST /api/auth/firebase-login
- * @desc    Firebase login + user auto-create/driver upgrade
- * @access  Private (requires Firebase token)
- */
-router.post("/firebase-login", verifyFirebaseToken, firebaseLogin);
+// NEW: OTP-based authentication (no Firebase Phone Auth needed)
+router.post('/send-otp', sendOTP);
+router.post('/verify-otp', verifyOTPAndLogin);
+
+// ORIGINAL: Firebase Phone Auth (requires Blaze plan)
+router.post('/firebase-login', firebaseLogin);
 
 export default router;

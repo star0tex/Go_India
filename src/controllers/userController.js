@@ -8,8 +8,34 @@ function formatMemberSince(createdAt) {
   const year = date.getFullYear();
   return `${month} ${year}`;
 }
+/* GET USER BY ID */
+export const getUserById = async (req, res) => {
+  try {
+    console.log("📥 GET /api/user/id/:id called");
+    const { id } = req.params;
+    
+    // Try finding by MongoDB _id or firebaseUid
+    let user = await User.findById(id);
+    if (!user) {
+      user = await User.findOne({ firebaseUid: id });
+    }
+    
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
+    }
 
-/* CREATE or UPDATE USER */
+    return res.status(200).json({
+      message: "Profile fetched successfully.",
+      user: {
+        ...user._doc,
+        memberSince: formatMemberSince(user.createdAt),
+      },
+    });
+  } catch (error) {
+    console.error("Error in getUserById:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};/* CREATE or UPDATE USER */
 export const createUser = async (req, res) => {
   try {
     const { phone, name, gender } = req.body;
