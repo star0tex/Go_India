@@ -1,3 +1,4 @@
+// src/config/tripConfig.js
 export const TRIP_LIMITS = {
   SHORT: 5000,
   PARCEL: 5000,

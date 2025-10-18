@@ -1,23 +1,32 @@
+// routes/walletRoutes.js - SECURE WALLET API ROUTES
 import express from 'express';
-import { 
-  processCashCollection, 
+import {
   getWalletByDriverId,
-  getTodayEarnings // ✅ ADD THIS
+  processCashCollection,
+  getTodayEarnings,
+  createRazorpayOrder,
+  verifyRazorpayPayment,
+  getPaymentProofs
 } from '../controllers/walletController.js';
 
 const router = express.Router();
 
-// @route   POST /api/wallet/collect-cash
-// @desc    Process cash collection after a trip
-router.post('/collect-cash', processCashCollection);
-router.get('/today/:driverId', getTodayEarnings);
-
-// @route   GET /api/wallet/:driverId
-// @desc    Get wallet details for a driver
+// ✅ GET wallet details
 router.get('/:driverId', getWalletByDriverId);
 
-// @route   GET /api/wallet/:driverId/today
-// @desc    Get today's earnings breakdown for driver dashboard
-// ✅ ADD THIS ROUTE (MUST be before /:driverId to avoid route conflict)
+// ✅ GET today's earnings
+router.get('/today/:driverId', getTodayEarnings);
+
+// ✅ GET payment proofs (pending payments)
+router.get('/payment-proof/:driverId', getPaymentProofs);
+
+// ✅ POST collect cash after trip
+router.post('/collect-cash', processCashCollection);
+
+// ✅ POST create Razorpay order (for UPI payment)
+router.post('/create-order', createRazorpayOrder);
+
+// ✅ POST verify Razorpay payment
+router.post('/verify-payment', verifyRazorpayPayment);
 
 export default router;

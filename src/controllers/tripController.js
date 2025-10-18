@@ -32,21 +32,14 @@ const createShortTrip = async (req, res) => {
   try {
     const { customerId, pickup, drop, vehicleType, fare } = req.body;
 
-    // ✅ ADD COMPREHENSIVE LOGGING
     console.log('');
     console.log('='.repeat(70));
     console.log('📥 CREATE SHORT TRIP REQUEST RECEIVED');
     console.log('='.repeat(70));
     console.log('📋 Request Body:', JSON.stringify(req.body, null, 2));
-    console.log('💰 Fare Details:');
-    console.log(`   Raw fare value: ${fare}`);
-    console.log(`   Fare type: ${typeof fare}`);
-    console.log(`   Fare is number: ${typeof fare === 'number'}`);
-    console.log(`   Fare > 0: ${fare > 0}`);
     console.log('='.repeat(70));
-    console.log('');
 
-    // ✅ **FIX**: Validate that a positive fare is provided
+    // Validate fare
     if (!fare || fare <= 0) {
       console.log('❌ REJECTED: Fare is invalid');
       return res.status(400).json({
@@ -55,6 +48,7 @@ const createShortTrip = async (req, res) => {
       });
     }
 
+    // Validate vehicle type
     if (!vehicleType || typeof vehicleType !== 'string' || vehicleType.trim() === '') {
       return res.status(400).json({
         success: false,
@@ -62,30 +56,55 @@ const createShortTrip = async (req, res) => {
       });
     }
 
+    // Normalize coordinates
     pickup.coordinates = normalizeCoordinates(pickup.coordinates);
     drop.coordinates = normalizeCoordinates(drop.coordinates);
 
     const sanitizedVehicleType = vehicleType.trim().toLowerCase();
 
+    // Find customer
     const customer = await findUserByIdOrPhone(customerId);
     if (!customer) {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
+    // ✅ FIXED: Simplified and explicit driver availability query
     const nearbyDrivers = await User.find({
       isDriver: true,
       vehicleType: sanitizedVehicleType,
       isOnline: true,
+      
+      // ✅ CRITICAL: Explicitly check for available drivers only
+      isBusy: { $ne: true }, // Not busy (includes false, null, undefined)
+      
+      // ✅ CRITICAL: No current trip assigned
+      $or: [
+        { currentTripId: null },
+        { currentTripId: { $exists: false } }
+      ],
+      
+      // Location near pickup
       location: {
         $near: {
           $geometry: { type: 'Point', coordinates: pickup.coordinates },
-          $maxDistance: TRIP_LIMITS.SHORT || 10000,
+          $maxDistance: TRIP_LIMITS.SHORT || 2000,
         },
       },
     })
-    .select('name phone vehicleType location isOnline socketId fcmToken')
+    .select('name phone vehicleType location isOnline socketId fcmToken currentTripId isBusy')
     .lean();
 
+    console.log(`🔍 Found ${nearbyDrivers.length} available '${sanitizedVehicleType}' drivers`);
+
+    // ✅ Enhanced logging for debugging
+    nearbyDrivers.forEach(d => {
+      console.log(`  ✓ ${d.name}:`);
+      console.log(`    - isBusy: ${d.isBusy}`);
+      console.log(`    - currentTripId: ${d.currentTripId}`);
+      console.log(`    - isOnline: ${d.isOnline}`);
+    });
+
+    // Create trip
     const trip = await Trip.create({
       customerId: customer._id,
       pickup,
@@ -99,8 +118,8 @@ const createShortTrip = async (req, res) => {
     console.log('✅ Trip created in database:');
     console.log(`   Trip ID: ${trip._id}`);
     console.log(`   Stored fare: ${trip.fare}`);
-    console.log('');
 
+    // Prepare broadcast payload
     const payload = {
       tripId: trip._id.toString(),
       type: trip.type,
@@ -119,29 +138,29 @@ const createShortTrip = async (req, res) => {
       fare: trip.fare,
     };
 
-    console.log('📤 Broadcasting to drivers with payload:');
-    console.log(`   Payload fare: ${payload.fare}`);
-    console.log(`   Number of drivers: ${nearbyDrivers.length}`);
-    console.log('');
-
     if (!nearbyDrivers.length) {
       console.warn(`⚠️ No '${sanitizedVehicleType}' drivers found for short trip ${trip._id}`);
       return res.status(200).json({ success: true, tripId: trip._id, drivers: 0 });
     }
 
+    // Broadcast to available drivers
     broadcastToDrivers(nearbyDrivers, payload);
+    
     console.log(`✅ Short Trip ${trip._id} created with fare ₹${trip.fare}`);
     console.log(`   Found ${nearbyDrivers.length} '${sanitizedVehicleType}' drivers`);
     console.log('='.repeat(70));
     
-    res.status(200).json({ success: true, tripId: trip._id, drivers: nearbyDrivers.length });
+    res.status(200).json({ 
+      success: true, 
+      tripId: trip._id, 
+      drivers: nearbyDrivers.length 
+    });
 
   } catch (err) {
     console.error('🔥 createShortTrip error:', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
-
 const createParcelTrip = async (req, res) => {
   try {
     const { customerId, pickup, drop, vehicleType, parcelDetails, fare } = req.body;
@@ -168,11 +187,22 @@ const createParcelTrip = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
-    const nearbyDrivers = await User.find({
-      isDriver: true,
-      vehicleType: sanitizedVehicleType,
-      isOnline: true,
-      location: {
+   const nearbyDrivers = await User.find({
+  isDriver: true,
+  vehicleType: sanitizedVehicleType,
+  isOnline: true,
+  $or: [
+    { 
+      currentTripId: null,
+      canReceiveNewRequests: { $in: [false, null, undefined] }
+    },
+    { 
+      currentTripId: { $ne: null },
+      canReceiveNewRequests: true
+    },
+    { currentTripId: { $exists: false } }
+  ],
+  location: {
         $near: {
           $geometry: { type: 'Point', coordinates: pickup.coordinates },
           $maxDistance: TRIP_LIMITS.PARCEL || 10000,
@@ -246,10 +276,21 @@ const createLongTrip = async (req, res) => {
 
     const radius = isSameDay ? TRIP_LIMITS.LONG_SAME_DAY : TRIP_LIMITS.LONG_ADVANCE;
 
-    const driverQuery = {
-      isDriver: true,
-      vehicleType,
-      location: {
+   const driverQuery = {
+  isDriver: true,
+  vehicleType,
+  $or: [
+    { 
+      currentTripId: null,
+      canReceiveNewRequests: { $in: [false, null, undefined] }
+    },
+    { 
+      currentTripId: { $ne: null },
+      canReceiveNewRequests: true
+    },
+    { currentTripId: { $exists: false } }
+  ],
+  location: {
         $near: {
           $geometry: { type: 'Point', coordinates: pickup.coordinates },
           $maxDistance: radius,
@@ -309,11 +350,42 @@ const acceptTrip = async (req, res) => {
   try {
     const { driverId, tripId } = req.body;
 
+    console.log('');
+    console.log('='.repeat(70));
     console.log(`🎯 Driver ${driverId} attempting to accept trip ${tripId}`);
+    console.log('='.repeat(70));
+
+    // ✅ STEP 1: Verify driver is truly available FIRST
+    const driver = await User.findById(driverId)
+      .select('name phone isBusy currentTripId isOnline vehicleType location photoUrl rating vehicleBrand vehicleNumber')
+      .lean();
+
+    if (!driver) {
+      console.log(`❌ Driver ${driverId} not found`);
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Driver not found' 
+      });
+    }
+
+    console.log(`📊 Driver current state BEFORE update:`);
+    console.log(`   - isBusy: ${driver.isBusy}`);
+    console.log(`   - currentTripId: ${driver.currentTripId}`);
+    console.log(`   - isOnline: ${driver.isOnline}`);
+
+    // ✅ Check if driver is already busy
+    if (driver.isBusy === true || driver.currentTripId) {
+      console.log(`⚠️ Driver ${driverId} is already on a trip!`);
+      return res.status(400).json({
+        success: false,
+        message: 'You are already on another trip',
+        reason: 'driver_busy'
+      });
+    }
 
     const rideCode = generateOTP();
-    console.log(`🎲 Generated OTP: "${rideCode}"`);
 
+    // ✅ STEP 2: ATOMIC OPERATION - Update trip AND check if available
     const trip = await Trip.findOneAndUpdate(
       { 
         _id: tripId, 
@@ -339,33 +411,73 @@ const acceptTrip = async (req, res) => {
       });
     }
 
-    console.log(`✅ Driver ${driverId} successfully claimed trip ${tripId}`);
+    console.log(`✅ Trip ${tripId} marked as driver_assigned`);
 
-    const driver = await User.findById(driverId)
-      .select('name photoUrl rating vehicleBrand vehicleNumber location phone')
-      .lean();
+    // ✅ STEP 3: Update driver status - CRITICAL FIX
+    const driverUpdate = await User.findByIdAndUpdate(
+      driverId,
+      {
+        $set: { 
+          currentTripId: tripId,
+          isBusy: true,
+          canReceiveNewRequests: false,
+          lastTripAcceptedAt: new Date()
+        }
+      },
+      { new: true, runValidators: false } // Skip validators for speed
+    );
+
+    if (!driverUpdate) {
+      console.error(`❌ CRITICAL: Failed to update driver ${driverId}!`);
       
-    if (!driver) {
-      console.error(`❌ Driver ${driverId} not found - Rolling back trip assignment`);
-      
+      // Rollback trip assignment
       await Trip.findByIdAndUpdate(tripId, { 
         $unset: { assignedDriver: 1, otp: 1 },
-        $set: { status: 'requested' }
+        $set: { status: 'requested', acceptedAt: null }
       });
       
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Driver not found' 
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update driver status. Please try again.',
+        reason: 'driver_update_failed'
       });
     }
 
+    // ✅ VERIFICATION: Check if update actually worked
+    const verifyDriver = await User.findById(driverId)
+      .select('isBusy currentTripId canReceiveNewRequests')
+      .lean();
+    
+    console.log(`📊 Driver state AFTER update:`);
+    console.log(`   - isBusy: ${verifyDriver.isBusy}`);
+    console.log(`   - currentTripId: ${verifyDriver.currentTripId}`);
+    console.log(`   - canReceiveNewRequests: ${verifyDriver.canReceiveNewRequests}`);
+
+    // ✅ Safety check: Verify the update worked
+    if (verifyDriver.isBusy !== true || verifyDriver.currentTripId?.toString() !== tripId) {
+      console.error(`❌ CRITICAL: Driver update verification FAILED!`);
+      console.error(`   Expected: isBusy=true, currentTripId=${tripId}`);
+      console.error(`   Actual: isBusy=${verifyDriver.isBusy}, currentTripId=${verifyDriver.currentTripId}`);
+      
+      // Rollback
+      await Trip.findByIdAndUpdate(tripId, { 
+        $unset: { assignedDriver: 1, otp: 1 },
+        $set: { status: 'requested', acceptedAt: null }
+      });
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Driver status update failed. Please try again.',
+        reason: 'verification_failed'
+      });
+    }
+
+    console.log(`✅ Driver ${driverId} successfully marked as BUSY`);
+
+    // ✅ STEP 4: Notify customer
     const customer = await User.findById(trip.customerId)
       .select('socketId fcmToken name')
       .lean();
-    
-    if (!customer) {
-      console.warn(`⚠️ Customer ${trip.customerId} not found`);
-    }
 
     if (customer?.socketId) {
       const payload = {
@@ -399,23 +511,21 @@ const acceptTrip = async (req, res) => {
         }
       };
       
-      console.log(`📢 Emitting 'trip:accepted' to customer ${customer._id}`);
       io.to(customer.socketId).emit('trip:accepted', payload);
       console.log(`✅ Customer notified via socket`);
-    } else {
-      console.warn(`⚠️ Customer ${customer?._id} has no socketId`);
     }
 
-    console.log(`🚫 Broadcasting cancellation for trip: ${tripId}`);
+    // ✅ STEP 5: Notify ALL other drivers that this trip is taken
+    console.log(`🚫 Broadcasting trip:taken to other drivers`);
     
     const otherDrivers = await User.find({
       isDriver: true,
       isOnline: true,
       _id: { $ne: driverId },
       socketId: { $exists: true, $ne: null }
-    }).select('_id socketId name').lean();
+    }).select('socketId name').lean();
 
-    console.log(`📡 Found ${otherDrivers.length} other drivers to notify`);
+    console.log(`📡 Notifying ${otherDrivers.length} other drivers`);
 
     otherDrivers.forEach(otherDriver => {
       if (otherDriver.socketId) {
@@ -425,7 +535,15 @@ const acceptTrip = async (req, res) => {
         });
       }
     });
-    
+
+    console.log('='.repeat(70));
+    console.log(`✅ SUCCESS: Trip accepted`);
+    console.log(`   Trip: ${tripId}`);
+    console.log(`   Driver: ${driver.name} (${driverId})`);
+    console.log(`   OTP: ${rideCode}`);
+    console.log('='.repeat(70));
+    console.log('');
+
     res.status(200).json({ 
       success: true, 
       message: "Trip accepted successfully",
@@ -437,6 +555,7 @@ const acceptTrip = async (req, res) => {
 
   } catch (err) {
     console.error('🔥 acceptTrip error:', err);
+    console.error(err.stack);
     res.status(500).json({ 
       success: false, 
       message: 'Failed to accept trip',
@@ -444,8 +563,6 @@ const acceptTrip = async (req, res) => {
     });
   }
 };
-
-
 const rejectTrip = async (req, res) => {
   try {
     const { tripId } = req.body;
@@ -476,22 +593,181 @@ const completeTrip = async (req, res) => {
   }
 };
 
+// ✅ UPDATED: Enhanced cancelTrip with proper cleanup
 const cancelTrip = async (req, res) => {
   try {
     const { tripId, cancelledBy } = req.body;
-    const trip = await Trip.findById(tripId);
-    if (!trip) return res.status(404).json({ success: false, message: 'Trip not found' });
-    if (trip.assignedDriver?.toString() !== cancelledBy && trip.customerId?.toString() !== cancelledBy) {
+    
+    console.log('');
+    console.log('='.repeat(70));
+    console.log('🚫 CANCEL TRIP REQUEST');
+    console.log(`   Trip ID: ${tripId}`);
+    console.log(`   Cancelled By: ${cancelledBy}`);
+    console.log('='.repeat(70));
+
+    // ✅ Validate input
+    if (!tripId || !cancelledBy) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'tripId and cancelledBy are required' 
+      });
+    }
+
+    // ✅ Use .lean() to get plain object
+    const trip = await Trip.findById(tripId).lean();
+    if (!trip) {
+      console.log('❌ Trip not found');
+      return res.status(404).json({ success: false, message: 'Trip not found' });
+    }
+
+    // ✅ Check if trip is already cancelled or completed
+    if (trip.status === 'cancelled') {
+      console.log('⚠️ Trip already cancelled');
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Trip is already cancelled' 
+      });
+    }
+
+    if (trip.status === 'completed') {
+      console.log('⚠️ Cannot cancel completed trip');
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Cannot cancel a completed trip' 
+      });
+    }
+
+    console.log(`📋 Trip status: ${trip.status}`);
+    console.log(`👤 Customer: ${trip.customerId}`);
+    console.log(`🚗 Driver: ${trip.assignedDriver || 'none'}`);
+
+    // Verify authorization
+    const isCustomer = trip.customerId?.toString() === cancelledBy;
+    const isDriver = trip.assignedDriver?.toString() === cancelledBy;
+    
+    if (!isCustomer && !isDriver) {
+      console.log('❌ Not authorized to cancel');
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
-    trip.status = 'cancelled';
-    trip.cancelledBy = cancelledBy;
-    await trip.save();
-    res.status(200).json({ success: true, message: 'Trip cancelled' });
+
+    // ✅ Update trip status
+    const updateResult = await Trip.updateOne(
+      { _id: tripId },
+      {
+        $set: {
+          status: 'cancelled',
+          cancelledBy: cancelledBy,
+          cancelledAt: new Date()
+        }
+      }
+    );
+
+    if (updateResult.modifiedCount === 0) {
+      console.log('❌ Failed to update trip');
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to cancel trip' 
+      });
+    }
+
+    console.log('✅ Trip marked as cancelled in database');
+
+    // ✅ CRITICAL: ALWAYS free driver completely if assigned (even if not found)
+    if (trip.assignedDriver) {
+      console.log('');
+      console.log('🧹 CLEARING DRIVER STATE AFTER CANCELLATION');
+      console.log(`   Driver ID: ${trip.assignedDriver}`);
+      console.log('');
+      
+      const driverUpdate = await User.findByIdAndUpdate(
+        trip.assignedDriver,
+        {
+          $set: { 
+            currentTripId: null,
+            isBusy: false,
+            canReceiveNewRequests: false,
+            awaitingCashCollection: false,
+            lastTripCancelledAt: new Date()
+          }
+        },
+        { new: true }
+      );
+      
+      if (driverUpdate) {
+        console.log(`✅ Driver ${trip.assignedDriver} COMPLETELY FREED:`);
+        console.log(`   - isBusy: false`);
+        console.log(`   - currentTripId: null`);
+        console.log(`   - canReceiveNewRequests: false`);
+        console.log(`   - awaitingCashCollection: false`);
+        console.log(`   - Driver can now accept new trips`);
+      } else {
+        console.log(`⚠️ Driver ${trip.assignedDriver} not found (may have been deleted)`);
+        console.log('   Continuing with cancellation anyway...');
+      }
+
+      // ✅ Find driver socket and notify (if online)
+      const driver = await User.findById(trip.assignedDriver)
+        .select('socketId name')
+        .lean();
+        
+      if (driver?.socketId) {
+        io.to(driver.socketId).emit('trip:cancelled', {
+          tripId: tripId,
+          message: isCustomer ? 'Customer cancelled the trip' : 'Trip cancelled',
+          cancelledBy: isCustomer ? 'customer' : 'driver',
+          timestamp: new Date().toISOString(),
+          shouldClearTrip: true // ✅ Tell driver to clear UI
+        });
+        console.log(`📢 Notified driver via socket: ${driver.socketId}`);
+      } else {
+        console.log(`⚠️ No active socket for driver ${trip.assignedDriver} (driver may be offline)`);
+      }
+    } else {
+      console.log('ℹ️ No driver assigned to this trip');
+    }
+
+    // ✅ Notify customer via socket (if online)
+    const customer = await User.findById(trip.customerId)
+      .select('socketId name')
+      .lean();
+      
+    if (customer?.socketId) {
+      io.to(customer.socketId).emit('trip:cancelled', {
+        tripId: tripId,
+        message: isDriver ? 'Driver cancelled the trip' : 'Trip cancelled',
+        cancelledBy: isDriver ? 'driver' : 'customer',
+        timestamp: new Date().toISOString(),
+        shouldClearTrip: true // ✅ Tell customer to clear UI
+      });
+      console.log(`📢 Notified customer via socket: ${customer.socketId}`);
+    } else {
+      console.log(`⚠️ No active socket for customer ${trip.customerId} (customer may be offline)`);
+    }
+
+    console.log('='.repeat(70));
+    console.log('✅ Trip cancellation complete - both parties freed');
+    console.log('='.repeat(70));
+    console.log('');
+
+    res.status(200).json({ 
+      success: true, 
+      message: 'Trip cancelled successfully',
+      tripId: tripId,
+      cancelledBy: isCustomer ? 'customer' : 'driver',
+      driverFreed: !!trip.assignedDriver
+    });
+
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error('🔥 cancelTrip error:', err);
+    console.error('Stack trace:', err.stack);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 };
+
 
 const getTripById = async (req, res) => {
   try {
@@ -502,8 +778,216 @@ const getTripById = async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 };
+/**
+ * Get driver's active trip for resumption
+ * GET /api/trip/driver/active/:driverId
+ */
+/**
+ * Get driver's active trip for resumption
+ * GET /api/trip/driver/active/:driverId
+ */
+const getDriverActiveTrip = async (req, res) => {
+  try {
+    const { driverId } = req.params;
 
-// ✅ FIXED: goingToPickup
+    console.log('');
+    console.log('='.repeat(70));
+    console.log(`🔍 CHECKING ACTIVE TRIP FOR DRIVER: ${driverId}`);
+    console.log('='.repeat(70));
+
+    // ✅ CRITICAL FIX: Find active trip EXCLUDING completed trips with payment collected
+    const trip = await Trip.findOne({
+      assignedDriver: driverId,
+      $and: [
+        // Must be one of these statuses
+        {
+          $or: [
+            // Active trip statuses
+            { 
+              status: { $in: ['driver_assigned', 'driver_going_to_pickup', 'driver_at_pickup', 'ride_started'] } 
+            },
+            // Completed but ONLY if payment NOT collected
+            { 
+              status: 'completed',
+              $or: [
+                { paymentCollected: { $ne: true } },  // Not true
+                { paymentCollected: { $exists: false } }  // Field doesn't exist
+              ]
+            }
+          ]
+        }
+      ]
+    })
+    .populate('customerId', 'name phone photoUrl rating')
+    .lean();
+
+    if (!trip) {
+      console.log('✅ No active trip found - CLEARING DRIVER STATE');
+      
+      // ✅ CRITICAL FIX: Clear driver state completely
+      const driverUpdate = await User.findByIdAndUpdate(driverId, {
+        $set: {
+          isBusy: false,
+          currentTripId: null,
+          canReceiveNewRequests: false,
+          awaitingCashCollection: false,
+          lastTripCheckedAt: new Date()
+        }
+      }, { new: true });
+      
+      if (driverUpdate) {
+        console.log('✅ Driver state cleared:');
+        console.log('   - isBusy: false');
+        console.log('   - currentTripId: null');
+        console.log('   - canReceiveNewRequests: false');
+        console.log('   - awaitingCashCollection: false');
+        console.log('   Driver is now FREE to accept new trips');
+      }
+      
+      console.log('='.repeat(70));
+      console.log('');
+      
+      return res.status(200).json({
+        success: true,
+        hasActiveTrip: false,
+        message: 'No active trip',
+        driverFreed: true
+      });
+    }
+
+    // ✅ Double-check payment status
+    if (trip.status === 'completed' && trip.paymentCollected === true) {
+      console.log('');
+      console.log('⚠️ FOUND COMPLETED TRIP WITH PAYMENT COLLECTED');
+      console.log(`   Trip ID: ${trip._id}`);
+      console.log(`   This should NOT have been returned - clearing driver state`);
+      console.log('');
+      
+      // Clear driver state
+      await User.findByIdAndUpdate(driverId, {
+        $set: {
+          isBusy: false,
+          currentTripId: null,
+          canReceiveNewRequests: false,
+          awaitingCashCollection: false,
+          lastTripCheckedAt: new Date()
+        }
+      });
+      
+      console.log('✅ Driver state cleared');
+      console.log('='.repeat(70));
+      console.log('');
+      
+      return res.status(200).json({
+        success: true,
+        hasActiveTrip: false,
+        message: 'No active trip (payment already collected)',
+        driverFreed: true
+      });
+    }
+
+    console.log('⚠️ ACTIVE TRIP FOUND:');
+    console.log(`   Trip ID: ${trip._id}`);
+    console.log(`   Status: ${trip.status}`);
+    console.log(`   Ride Phase: ${trip.rideStatus || 'N/A'}`);
+    console.log(`   OTP: ${trip.otp || 'N/A'}`);
+    console.log(`   Customer: ${trip.customerId?.name || 'Unknown'}`);
+    console.log(`   Payment Collected: ${trip.paymentCollected || false}`);
+
+    // ✅ Determine ride phase
+    let ridePhase = 'going_to_pickup'; // default
+    
+    if (trip.rideStatus === 'ride_started') {
+      ridePhase = 'going_to_drop';
+    } else if (trip.rideStatus === 'arrived_at_pickup') {
+      ridePhase = 'at_pickup';
+    } else if (trip.rideStatus === 'completed' || trip.status === 'completed') {
+      // ✅ Only set to completed if payment NOT collected
+      if (trip.paymentCollected !== true) {
+        ridePhase = 'completed';
+      }
+    } else if (trip.status === 'ride_started') {
+      ridePhase = 'going_to_drop';
+    } else if (trip.status === 'driver_at_pickup') {
+      ridePhase = 'at_pickup';
+    } else if (trip.status === 'driver_going_to_pickup') {
+      ridePhase = 'going_to_pickup';
+    } else if (trip.status === 'driver_assigned') {
+      ridePhase = 'going_to_pickup';
+    }
+
+    console.log(`   Determined Phase: ${ridePhase}`);
+
+    // ✅ SAFETY CHECK: If phase is 'completed' but payment is collected, something is wrong
+    if (ridePhase === 'completed' && trip.paymentCollected === true) {
+      console.log('');
+      console.log('❌ CRITICAL ERROR: Phase is completed but payment already collected!');
+      console.log('   This should never happen. Clearing driver state...');
+      console.log('');
+      
+      await User.findByIdAndUpdate(driverId, {
+        $set: {
+          isBusy: false,
+          currentTripId: null,
+          canReceiveNewRequests: false,
+          awaitingCashCollection: false
+        }
+      });
+      
+      return res.status(200).json({
+        success: true,
+        hasActiveTrip: false,
+        message: 'Trip completed and paid - no action needed',
+        driverFreed: true
+      });
+    }
+
+    // Format response
+    const response = {
+      success: true,
+      hasActiveTrip: true,
+      trip: {
+        tripId: trip._id.toString(),
+        rideCode: trip.otp,
+        status: trip.status,
+        ridePhase: ridePhase,
+        fare: trip.fare || trip.finalFare || 0,
+        paymentCollected: trip.paymentCollected || false, // ✅ Include this
+        pickup: {
+          lat: trip.pickup.coordinates[1],
+          lng: trip.pickup.coordinates[0],
+          address: trip.pickup.address
+        },
+        drop: {
+          lat: trip.drop.coordinates[1],
+          lng: trip.drop.coordinates[0],
+          address: trip.drop.address
+        }
+      },
+      customer: trip.customerId ? {
+        id: trip.customerId._id.toString(),
+        name: trip.customerId.name || 'Customer',
+        phone: trip.customerId.phone || 'N/A',
+        photoUrl: trip.customerId.photoUrl || null,
+        rating: trip.customerId.rating || 5.0
+      } : null
+    };
+
+    console.log('📤 Sending trip resume data to driver');
+    console.log('='.repeat(70));
+    console.log('');
+
+    res.status(200).json(response);
+
+  } catch (err) {
+    console.error('🔥 getDriverActiveTrip error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch active trip',
+      error: err.message 
+    });
+  }
+};
 const goingToPickup = async (req, res) => {
   try {
     const { tripId, driverId } = req.body;
@@ -603,111 +1087,351 @@ const completeRideWithVerification = async (req, res) => {
   try {
     const { tripId, driverId, driverLat, driverLng } = req.body;
 
-    console.log(`✅ Driver ${driverId} completing trip ${tripId}`);
+    console.log('');
+    console.log('='.repeat(70));
+    console.log('🏁 COMPLETE RIDE REQUEST');
+    console.log(`   Trip ID: ${tripId}`);
+    console.log(`   Driver ID: ${driverId}`);
+    console.log('='.repeat(70));
 
     const trip = await Trip.findById(tripId);
     if (!trip) {
+      console.log('❌ Trip not found');
       return res.status(404).json({ success: false, message: 'Trip not found' });
     }
 
     if (trip.assignedDriver?.toString() !== driverId) {
+      console.log('❌ Not authorized');
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
-    // Check ride was started
-    if (trip.rideStatus !== 'ride_started') {
+    if (trip.status !== 'ride_started' && trip.rideStatus !== 'ride_started') {
+      console.log(`❌ Invalid trip status: ${trip.status} / ${trip.rideStatus}`);
       return res.status(400).json({
         success: false,
         message: 'Ride must be started before completion'
       });
     }
 
+    // ✅ Calculate distance to drop location
     const dropLat = trip.drop.coordinates[1];
     const dropLng = trip.drop.coordinates[0];
     const distance = calculateDistance(driverLat, driverLng, dropLat, dropLng);
 
-    if (distance > 0.1) {
+    console.log(`📍 Distance to drop: ${(distance * 1000).toFixed(0)}m`);
+
+    if (distance > 0.5) { // Allow 500m radius
       return res.status(400).json({
         success: false,
-        message: `You are ${(distance * 1000).toFixed(0)}m away from drop location. Please reach drop location first.`,
+        message: `You are ${(distance * 1000).toFixed(0)}m away from drop location. Please reach destination first.`,
         distance: distance
       });
     }
 
-    // ✅ Update both status fields
-    trip.status = 'completed';
-    trip.rideStatus = 'completed';
-    trip.endTime = new Date();
-    trip.finalFare = trip.fare || 0;
-        trip.completedAt = new Date(); // ✅ ADD THIS LINE
+    // ✅ CRITICAL: Update trip and EXPLICITLY set paymentCollected to false
+    const updatedTrip = await Trip.findByIdAndUpdate(
+      tripId,
+      {
+        $set: {
+          status: 'completed',
+          rideStatus: 'completed',
+          endTime: new Date(),
+          finalFare: trip.fare || 0,
+          completedAt: new Date(),
+          paymentCollected: false,      // ✅ EXPLICIT: Not collected yet
+          paymentCollectedAt: null       // ✅ EXPLICIT: No collection time
+        }
+      },
+      { new: true }
+    );
 
-    // Save first
-    await trip.save();
-    console.log(`✅ Ride completed for trip ${tripId} with fare: ₹${trip.finalFare}`);
+    console.log(`✅ Trip ${tripId} marked as completed`);
+    console.log(`   Status: ${updatedTrip.status}`);
+    console.log(`   Payment Collected: ${updatedTrip.paymentCollected}`);  // Should be false
+    console.log(`   Final Fare: ₹${updatedTrip.finalFare}`);
 
-    // Emit after successful save
-    const customer = await User.findById(trip.customerId);
+    // ✅ CRITICAL: Update driver - keep on trip until cash collected
+    await User.findByIdAndUpdate(driverId, {
+      $set: { 
+        currentTripId: tripId,           // ✅ KEEP tripId for now
+        isBusy: true,                    // ✅ Still busy (collecting cash)
+        canReceiveNewRequests: false,     // ✅ Cannot accept new trips yet
+        awaitingCashCollection: true,     // ✅ Flag for UI
+        lastTripCompletedAt: new Date()
+      }
+    });
+    
+    console.log(`✅ Driver ${driverId} status: awaiting cash collection`);
+    console.log(`   - isBusy: true (until cash collected)`);
+    console.log(`   - currentTripId: ${tripId}`);
+    console.log(`   - awaitingCashCollection: true`);
+
+    // ✅ Verify the update worked
+    const verifyTrip = await Trip.findById(tripId).select('paymentCollected').lean();
+    console.log(`🔍 Verification - paymentCollected: ${verifyTrip.paymentCollected}`);  // Should be false
+
+    if (verifyTrip.paymentCollected === true) {
+      console.error('❌ CRITICAL ERROR: paymentCollected was set to true!');
+      console.error('   This should not happen. Check Trip model defaults.');
+    }
+
+    // Emit to customer
+    const customer = await User.findById(trip.customerId).select('socketId').lean();
     if (customer?.socketId) {
       io.to(customer.socketId).emit('trip:completed', {
-        tripId: trip._id.toString(),
-        endTime: trip.endTime,
-        fare: trip.finalFare
+        tripId: tripId,
+        endTime: updatedTrip.endTime,
+        fare: updatedTrip.finalFare,
+        awaitingPayment: true  // ✅ Tell customer driver is waiting for cash
       });
-      console.log(`📢 trip:completed emitted to customer ${customer._id} with fare: ₹${trip.finalFare}`);
+      console.log(`📢 Emitted trip:completed to customer`);
     }
+
+    console.log('='.repeat(70));
+    console.log('');
 
     res.status(200).json({
       success: true,
-      message: 'Ride completed successfully',
-      fare: trip.finalFare,
-      duration: Math.round((trip.endTime - trip.startTime) / 60000)
+      message: 'Ride completed. Please collect cash from customer.',
+      fare: updatedTrip.finalFare,
+      duration: Math.round((updatedTrip.endTime - trip.startTime) / 60000),
+      awaitingCashCollection: true,
+      paymentCollected: false  // ✅ Explicitly tell driver payment not collected
     });
+
   } catch (err) {
     console.error('🔥 completeRideWithVerification error:', err);
+    console.error('Stack:', err.stack);
     res.status(500).json({ success: false, message: err.message });
+  }
+};// ✅ ADD this to tripController.js exports and route
+
+/**
+ * Get trip by ID with payment status
+ * GET /api/trip/:tripId
+ */
+const getTripByIdWithPayment = async (req, res) => {
+  try {
+    const { tripId } = req.params;
+
+    console.log(`🔍 Fetching trip details for: ${tripId}`);
+
+    const trip = await Trip.findById(tripId)
+      .populate('assignedDriver', 'name phone photoUrl rating vehicleBrand vehicleNumber')
+      .populate('customerId', 'name phone photoUrl rating')
+      .lean();
+
+    if (!trip) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Trip not found' 
+      });
+    }
+
+    console.log(`✅ Trip found:`);
+    console.log(`   Status: ${trip.status}`);
+    console.log(`   Payment Collected: ${trip.paymentCollected}`);
+
+    res.status(200).json({ 
+      success: true, 
+      trip: {
+        _id: trip._id,
+        status: trip.status,
+        rideStatus: trip.rideStatus,
+        paymentCollected: trip.paymentCollected || false,
+        paymentCollectedAt: trip.paymentCollectedAt,
+        fare: trip.fare,
+        finalFare: trip.finalFare,
+        otp: trip.otp,
+        pickup: trip.pickup,
+        drop: trip.drop,
+        assignedDriver: trip.assignedDriver,
+        customerId: trip.customerId,
+        createdAt: trip.createdAt,
+        completedAt: trip.completedAt
+      }
+    });
+
+  } catch (err) {
+    console.error('🔥 getTripByIdWithPayment error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch trip details',
+      error: err.message 
+    });
   }
 };
 
+// ✅ COMPLETE FIX for confirmCashCollection in tripController.js
+
+// ✅ FIXED: confirmCashCollection in tripController.js
+// REMOVE the trip update - let processCashCollection handle it
+
 const confirmCashCollection = async (req, res) => {
   try {
-    const { tripId, driverId } = req.body;
+    const { tripId, driverId, fare } = req.body;
 
-    const trip = await Trip.findById(tripId);
+    console.log('');
+    console.log('='.repeat(70));
+    console.log('💰 CONFIRM CASH COLLECTION REQUEST');
+    console.log(`   Trip ID: ${tripId}`);
+    console.log(`   Driver ID: ${driverId}`);
+    console.log(`   Fare: ${fare || 'from trip'}`);
+    console.log('='.repeat(70));
+
+    // Validate input
+    if (!tripId || !driverId) {
+      return res.status(400).json({
+        success: false,
+        message: 'tripId and driverId are required'
+      });
+    }
+
+    // ✅ STEP 1: Fetch trip with current state
+    const trip = await Trip.findById(tripId).lean();
     if (!trip) {
+      console.log('❌ Trip not found');
       return res.status(404).json({ success: false, message: 'Trip not found' });
     }
 
+    console.log(`📋 Trip current state:`);
+    console.log(`   Status: ${trip.status}`);
+    console.log(`   Payment Collected: ${trip.paymentCollected}`);
+    console.log(`   Assigned Driver: ${trip.assignedDriver}`);
+
+    // ✅ STEP 2: Verify authorization
     if (trip.assignedDriver?.toString() !== driverId) {
+      console.log('❌ Driver not authorized');
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
+    // ✅ STEP 3: Verify trip is completed
     if (trip.status !== 'completed') {
+      console.log(`❌ Trip not completed yet. Current status: ${trip.status}`);
       return res.status(400).json({
         success: false,
         message: 'Trip must be completed before collecting cash'
       });
     }
 
-    if (trip.paymentCollected) {
+    // ✅ STEP 4: Check if already collected
+    if (trip.paymentCollected === true) {
+      console.log('⚠️ Cash already collected!');
       return res.status(400).json({
         success: false,
-        message: 'Cash already collected for this trip'
+        message: 'Cash already collected for this trip',
+        collectedAt: trip.paymentCollectedAt
       });
     }
+
+    console.log('✅ All validations passed - proceeding with wallet processing');
+
+    const fareAmount = fare || trip.finalFare || trip.fare || 0;
     
-    // ✅ This function handles its own response, so don't send another
-    await processCashCollection(req, res);
-    
+    if (fareAmount <= 0) {
+      console.log('❌ Invalid fare amount');
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid fare amount'
+      });
+    }
+
+    console.log(`💵 Processing fare: ₹${fareAmount}`);
+
+    // ✅ STEP 5: Call processCashCollection - it will handle EVERYTHING
+    // (trip update, wallet update, driver state, socket events)
+    const mockReq = {
+      body: {
+        tripId,
+        driverId,
+        fare: fareAmount
+      }
+    };
+
+    // Create a promise-based wrapper for the response
+    let walletResult;
+    try {
+      walletResult = await new Promise((resolve, reject) => {
+        const mockRes = {
+          status: (code) => ({
+            json: (data) => {
+              if (code === 200 && data.success) {
+                resolve({ success: true, data });
+              } else {
+                resolve({ 
+                  success: false, 
+                  message: data.message || 'Wallet processing failed',
+                  data 
+                });
+              }
+            }
+          }),
+          headersSent: false
+        };
+
+        // Call the actual processCashCollection function
+        processCashCollection(mockReq, mockRes).catch(reject);
+      });
+    } catch (walletError) {
+      console.error('❌ Wallet processing error:', walletError);
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Wallet processing failed: ' + walletError.message
+      });
+    }
+
+    if (!walletResult.success) {
+      console.error('❌ Wallet processing failed:', walletResult.message);
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Wallet processing failed: ' + walletResult.message
+      });
+    }
+
+    console.log('✅ Wallet transaction successful');
+
+    console.log('');
+    console.log('✅ CASH COLLECTION COMPLETE - Driver ready for next trip');
+    console.log('='.repeat(70));
+    console.log('');
+
+    // Extract wallet data from the result
+    const walletData = walletResult.data?.wallet || {};
+    const fareBreakdown = walletResult.data?.fareBreakdown || {};
+
+    res.status(200).json({
+      success: true,
+      message: 'Cash collected successfully',
+      amount: fareAmount,
+      fareBreakdown: {
+        tripFare: Number((fareBreakdown.tripFare || fareAmount).toFixed(2)),
+        commission: Number((fareBreakdown.commission || 0).toFixed(2)),
+        commissionPercentage: fareBreakdown.commissionPercentage || 15,
+        driverEarning: Number((fareBreakdown.driverEarning || 0).toFixed(2))
+      },
+      wallet: {
+        totalEarnings: Number((walletData.totalEarnings || 0).toFixed(2)),
+        totalCommission: Number((walletData.totalCommission || 0).toFixed(2)),
+        pendingAmount: Number((walletData.pendingAmount || 0).toFixed(2)),
+        availableBalance: Number((walletData.availableBalance || 0).toFixed(2))
+      }
+    });
+
   } catch (err) {
     console.error('🔥 confirmCashCollection error:', err);
-    // Only send response if one hasn't been sent yet
+    console.error('Stack:', err.stack);
+    
     if (!res.headersSent) {
-      res.status(500).json({ success: false, message: err.message });
+      res.status(500).json({ 
+        success: false, 
+        message: 'Failed to confirm cash collection',
+        error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      });
     }
   }
 };
-
-// Helper function
 function calculateDistance(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = toRad(lat2 - lat1);
@@ -723,6 +1447,85 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 function toRad(value) {
   return value * Math.PI / 180;
 }
+// ADD THIS NEW FUNCTION (after completeRideWithVerification)
+
+/**
+ * Check if customer has an active ride
+ * GET /api/trip/active/:customerId
+ */
+const getActiveRide = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+
+    console.log(`🔍 Checking active ride for customer: ${customerId}`);
+
+    // Find active trip for this customer
+    const trip = await Trip.findOne({
+      customerId,
+      status: { $in: ['driver_assigned', 'driver_going_to_pickup', 'driver_at_pickup', 'ride_started'] }
+    })
+    .populate('assignedDriver', 'name phone photoUrl rating vehicleBrand vehicleNumber location')
+    .lean();
+
+    if (!trip) {
+      return res.status(200).json({
+        success: true,
+        hasActiveRide: false,
+        message: 'No active ride found'
+      });
+    }
+
+    console.log(`✅ Found active ride: ${trip._id}, status: ${trip.status}`);
+
+    // Format response
+    const response = {
+      success: true,
+      hasActiveRide: true,
+      trip: {
+        tripId: trip._id.toString(),
+        rideCode: trip.otp,
+        status: trip.status,
+        rideStatus: trip.rideStatus,
+        pickup: {
+          lat: trip.pickup.coordinates[1],
+          lng: trip.pickup.coordinates[0],
+          address: trip.pickup.address
+        },
+        drop: {
+          lat: trip.drop.coordinates[1],
+          lng: trip.drop.coordinates[0],
+          address: trip.drop.address
+        },
+        fare: trip.fare || trip.finalFare || 0,
+      },
+      driver: trip.assignedDriver ? {
+        id: trip.assignedDriver._id.toString(),
+        name: trip.assignedDriver.name || 'Driver',
+        phone: trip.assignedDriver.phone || 'N/A',
+        photoUrl: trip.assignedDriver.photoUrl || null,
+        rating: trip.assignedDriver.rating || 4.8,
+        vehicleBrand: trip.assignedDriver.vehicleBrand || 'Vehicle',
+        vehicleNumber: trip.assignedDriver.vehicleNumber || 'N/A',
+        location: {
+          lat: trip.assignedDriver.location.coordinates[1],
+          lng: trip.assignedDriver.location.coordinates[0]
+        }
+      } : null
+    };
+
+    res.status(200).json(response);
+
+  } catch (err) {
+    console.error('🔥 getActiveRide error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to check active ride',
+      error: err.message 
+    });
+  }
+};
+
+// ADD TO EXPORTS at bottom
 export {
   createShortTrip,
   createParcelTrip,
@@ -736,4 +1539,8 @@ export {
   startRide,
   completeRideWithVerification,
   confirmCashCollection,
+  getDriverActiveTrip, // ✅ ADD THIS
+  getTripByIdWithPayment, // ✅ ADD THIS
+
+  getActiveRide, // ✅ ADD THIS
 };

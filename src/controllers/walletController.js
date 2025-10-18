@@ -1,27 +1,55 @@
-// src/controllers/walletController.js - PRODUCTION-READY VERSION
+// walletController.js - SECURE UPI PAYMENT WITH RAZORPAY
 import mongoose from 'mongoose';
 import Wallet from '../models/Wallet.js';
 import Trip from '../models/Trip.js';
 import User from '../models/User.js';
 import { io } from '../socket/socketHandler.js';
+import Razorpay from 'razorpay';
+import crypto from 'crypto';
+
+// ✅ Initialize Razorpay with enhanced security
+const initializeRazorpay = () => {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+
+  if (!keyId || !keySecret) {
+    console.error('🔥 RAZORPAY CREDENTIALS MISSING');
+    console.error('Please set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env');
+    throw new Error('Razorpay credentials not configured');
+  }
+
+  // Validate credential format
+  if (!keyId.startsWith('rzp_test_') && !keyId.startsWith('rzp_live_')) {
+    console.warn('⚠️  Warning: Razorpay Key ID format incorrect');
+  }
+
+  console.log('✅ Razorpay initialized:', keyId.substring(0, 12) + '...');
+
+  return new Razorpay({
+    key_id: keyId,
+    key_secret: keySecret,
+  });
+};
+
+let razorpay;
+try {
+  razorpay = initializeRazorpay();
+} catch (error) {
+  console.error('Failed to initialize Razorpay:', error.message);
+}
 
 // Configuration
 const COMMISSION_PERCENTAGE = 15;
-const PAISA_MULTIPLIER = 100; // Store amounts in paisa for precision
+const PAISA_MULTIPLIER = 100;
+const MAX_PAYMENT_AMOUNT = 100000; // ₹100,000 max
+const MIN_PAYMENT_AMOUNT = 1; // ₹1 min
 
-/**
- * Convert rupees to paisa (integer)
- */
 const toPaisa = (rupees) => Math.round(rupees * PAISA_MULTIPLIER);
-
-/**
- * Convert paisa to rupees (decimal)
- */
 const toRupees = (paisa) => paisa / PAISA_MULTIPLIER;
 
-/**
- * Calculate fare breakdown with precision
- */
+// ✅ Payment state tracking to prevent duplicate processing
+const paymentProcessing = new Map();
+
 const calculateFareBreakdown = (tripFare) => {
   const tripFareInPaisa = toPaisa(tripFare);
   const commissionInPaisa = Math.round((tripFareInPaisa * COMMISSION_PERCENTAGE) / 100);
@@ -35,9 +63,6 @@ const calculateFareBreakdown = (tripFare) => {
   };
 };
 
-/**
- * Get or create wallet for a driver (with atomic upsert)
- */
 const getOrCreateWallet = async (driverId, session = null) => {
   const wallet = await Wallet.findOneAndUpdate(
     { driverId },
@@ -62,6 +87,414 @@ const getOrCreateWallet = async (driverId, session = null) => {
 };
 
 /**
+ * ✅ CREATE RAZORPAY ORDER (SECURE)
+ * POST /api/wallet/create-order
+ */
+const createRazorpayOrder = async (req, res) => {
+  try {
+    // Security: Check if Razorpay is initialized
+    if (!razorpay) {
+      return res.status(503).json({
+        success: false,
+        message: 'Payment service temporarily unavailable',
+        errorCode: 'SERVICE_UNAVAILABLE'
+      });
+    }
+
+    const { driverId, amount } = req.body;
+
+    // Validate input
+    if (!driverId || !mongoose.Types.ObjectId.isValid(driverId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid driver ID'
+      });
+    }
+
+    // Validate amount
+    if (!amount || isNaN(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid amount'
+      });
+    }
+
+    // Security: Amount limits
+    if (amount < MIN_PAYMENT_AMOUNT) {
+      return res.status(400).json({
+        success: false,
+        message: `Minimum payment amount is ₹${MIN_PAYMENT_AMOUNT}`
+      });
+    }
+
+    if (amount > MAX_PAYMENT_AMOUNT) {
+      return res.status(400).json({
+        success: false,
+        message: `Maximum payment amount is ₹${MAX_PAYMENT_AMOUNT}`
+      });
+    }
+
+    // Verify driver exists
+    const driver = await User.findById(driverId).select('_id role');
+    if (!driver || driver.role !== 'driver') {
+      return res.status(404).json({
+        success: false,
+        message: 'Driver not found'
+      });
+    }
+
+    // Get wallet and verify pending amount
+    const wallet = await getOrCreateWallet(driverId);
+
+    if (amount > wallet.pendingAmount + 0.01) { // 1 paisa tolerance
+      return res.status(400).json({
+        success: false,
+        message: `Amount exceeds pending commission (₹${wallet.pendingAmount.toFixed(2)})`
+      });
+    }
+
+    // Security: Check for duplicate order creation
+    const recentOrder = wallet.transactions.find(t => 
+      t.razorpayOrderId && 
+      t.createdAt > new Date(Date.now() - 5 * 60 * 1000) // Last 5 minutes
+    );
+
+    if (recentOrder) {
+      console.log('⚠️  Recent order exists, checking status...');
+    }
+
+    // Create secure receipt ID (max 40 chars)
+    const timestamp = Date.now().toString().slice(-10);
+    const driverIdShort = driverId.toString().slice(-8);
+    const receipt = `rcpt_${driverIdShort}_${timestamp}`;
+    
+    const options = {
+      amount: toPaisa(amount), // Convert to paise
+      currency: 'INR',
+      receipt: receipt,
+      notes: {
+        driverId: driverId.toString(),
+        purpose: 'commission_payment',
+        timestamp: new Date().toISOString()
+      },
+      payment_capture: 1 // Auto-capture payment
+    };
+
+    console.log('Creating Razorpay order:', {
+      receipt,
+      amount: `${options.amount} paise (₹${amount})`,
+      driverId
+    });
+
+    // Create order with Razorpay
+    const order = await razorpay.orders.create(options);
+
+    console.log('✅ Order created:', order.id);
+
+    // Store order reference in wallet (optional tracking)
+    await Wallet.findOneAndUpdate(
+      { driverId },
+      {
+        $push: {
+          transactions: {
+            type: 'debit',
+            amount: amount,
+            description: `Payment order created - ${order.id}`,
+            razorpayOrderId: order.id,
+            status: 'pending',
+            createdAt: new Date()
+          }
+        }
+      }
+    );
+
+    res.status(200).json({
+      success: true,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      keyId: process.env.RAZORPAY_KEY_ID,
+      message: 'Order created successfully'
+    });
+
+  } catch (err) {
+    console.error('🔥 createRazorpayOrder error:', err);
+    
+    let message = 'Failed to create order';
+    let errorCode = 'ORDER_CREATION_FAILED';
+    let statusCode = 500;
+
+    if (err.statusCode === 401) {
+      message = 'Payment gateway authentication failed';
+      errorCode = 'AUTH_FAILED';
+      statusCode = 503;
+    } else if (err.statusCode === 400) {
+      message = err.error?.description || 'Invalid order parameters';
+      errorCode = 'INVALID_REQUEST';
+      statusCode = 400;
+    } else if (err.error?.code) {
+      message = err.error.description || message;
+      errorCode = err.error.code;
+    }
+
+    res.status(statusCode).json({ 
+      success: false, 
+      message,
+      errorCode
+    });
+  }
+};
+
+/**
+ * ✅ VERIFY RAZORPAY PAYMENT (MAXIMUM SECURITY)
+ * POST /api/wallet/verify-payment
+ */
+const verifyRazorpayPayment = async (req, res) => {
+  let session = null;
+
+  try {
+    // Security: Check Razorpay initialization
+    if (!razorpay) {
+      return res.status(503).json({
+        success: false,
+        message: 'Payment verification service unavailable',
+        errorCode: 'SERVICE_UNAVAILABLE'
+      });
+    }
+
+    const { driverId, paymentId, orderId, signature } = req.body;
+
+    // Validate all required fields
+    if (!driverId || !paymentId || !orderId || !signature) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required payment details'
+      });
+    }
+
+    // Validate driver ID
+    if (!mongoose.Types.ObjectId.isValid(driverId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid driver ID'
+      });
+    }
+
+    // Security: Prevent duplicate processing
+    const processingKey = `${driverId}-${paymentId}`;
+    if (paymentProcessing.has(processingKey)) {
+      console.log('⚠️  Payment already being processed:', paymentId);
+      return res.status(409).json({
+        success: false,
+        message: 'Payment is already being processed',
+        errorCode: 'DUPLICATE_PROCESSING'
+      });
+    }
+
+    // Mark as processing
+    paymentProcessing.set(processingKey, Date.now());
+
+    // Security: Verify signature FIRST (before any DB operations)
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    const generatedSignature = crypto
+      .createHmac('sha256', keySecret)
+      .update(`${orderId}|${paymentId}`)
+      .digest('hex');
+
+    if (generatedSignature !== signature) {
+      paymentProcessing.delete(processingKey);
+      console.error('❌ SIGNATURE MISMATCH - POSSIBLE FRAUD ATTEMPT');
+      console.error('Expected:', generatedSignature);
+      console.error('Received:', signature);
+      
+      return res.status(400).json({
+        success: false,
+        message: 'Payment verification failed - invalid signature',
+        errorCode: 'SIGNATURE_MISMATCH'
+      });
+    }
+
+    console.log('✅ Signature verified successfully');
+
+    // Fetch payment details from Razorpay to double-check
+    const payment = await razorpay.payments.fetch(paymentId);
+
+    console.log('Payment status:', payment.status);
+    console.log('Payment amount:', payment.amount, 'paise');
+    console.log('Payment order_id:', payment.order_id);
+
+    // Security: Verify payment status
+    if (payment.status !== 'captured' && payment.status !== 'authorized') {
+      paymentProcessing.delete(processingKey);
+      return res.status(400).json({
+        success: false,
+        message: `Payment not completed. Status: ${payment.status}`,
+        errorCode: 'PAYMENT_NOT_CAPTURED'
+      });
+    }
+
+    // Security: Verify order ID matches
+    if (payment.order_id !== orderId) {
+      paymentProcessing.delete(processingKey);
+      console.error('❌ Order ID mismatch');
+      return res.status(400).json({
+        success: false,
+        message: 'Payment verification failed - order mismatch',
+        errorCode: 'ORDER_MISMATCH'
+      });
+    }
+
+    const amount = toRupees(payment.amount);
+
+    // Security: Check if this payment was already processed
+    const existingTransaction = await Wallet.findOne({
+      driverId,
+      'transactions.razorpayPaymentId': paymentId
+    });
+
+    if (existingTransaction) {
+      const existingTxn = existingTransaction.transactions.find(
+        t => t.razorpayPaymentId === paymentId && t.status === 'completed'
+      );
+      
+      if (existingTxn) {
+        paymentProcessing.delete(processingKey);
+        console.log('⚠️  Payment already processed:', paymentId);
+        return res.status(200).json({
+          success: true,
+          message: 'Payment already processed',
+          wallet: {
+            totalEarnings: Number(existingTransaction.totalEarnings.toFixed(2)),
+            totalCommission: Number(existingTransaction.totalCommission.toFixed(2)),
+            pendingAmount: Number(existingTransaction.pendingAmount.toFixed(2)),
+            availableBalance: Number(existingTransaction.availableBalance.toFixed(2)),
+          }
+        });
+      }
+    }
+
+    // Start database transaction
+    session = await mongoose.startSession();
+    session.startTransaction();
+
+    // Get wallet with lock
+    const wallet = await Wallet.findOne({ driverId }).session(session);
+    
+    if (!wallet) {
+      throw new Error('Wallet not found');
+    }
+
+    // Security: Verify amount doesn't exceed pending
+    if (amount > wallet.pendingAmount + 0.01) {
+      throw new Error(`Amount (₹${amount}) exceeds pending commission (₹${wallet.pendingAmount.toFixed(2)})`);
+    }
+
+    // Update wallet - deduct pending amount
+    const updatedWallet = await Wallet.findOneAndUpdate(
+      { driverId },
+      {
+        $inc: { 
+          pendingAmount: -amount 
+        },
+        $push: {
+          transactions: {
+            type: 'debit',
+            amount: Number(amount.toFixed(2)),
+            description: `Commission paid via ${payment.method?.toUpperCase() || 'Razorpay'} (${paymentId.substring(0, 15)}...)`,
+            razorpayPaymentId: paymentId,
+            razorpayOrderId: orderId,
+            status: 'completed',
+            paymentMethod: payment.method || 'unknown',
+            createdAt: new Date()
+          }
+        },
+        $set: {
+          lastUpdated: new Date()
+        }
+      },
+      { new: true, session }
+    );
+
+    // Commit transaction
+    await session.commitTransaction();
+
+    // Remove from processing map
+    paymentProcessing.delete(processingKey);
+
+    console.log('');
+    console.log('='.repeat(70));
+    console.log('💳 PAYMENT VERIFIED & PROCESSED');
+    console.log(`   Payment ID: ${paymentId}`);
+    console.log(`   Order ID: ${orderId}`);
+    console.log(`   Driver ID: ${driverId}`);
+    console.log(`   Amount: ₹${amount}`);
+    console.log(`   Method: ${payment.method || 'unknown'}`);
+    console.log(`   Status: ${payment.status}`);
+    console.log('='.repeat(70));
+    console.log('');
+
+    // Emit real-time update to driver
+    const driver = await User.findById(driverId).select('socketId').lean();
+    if (driver?.socketId) {
+      io.to(driver.socketId).emit('wallet:updated', {
+        wallet: {
+          totalEarnings: Number(updatedWallet.totalEarnings.toFixed(2)),
+          totalCommission: Number(updatedWallet.totalCommission.toFixed(2)),
+          pendingAmount: Number(updatedWallet.pendingAmount.toFixed(2)),
+          availableBalance: Number(updatedWallet.availableBalance.toFixed(2)),
+        },
+        message: 'Commission payment successful',
+        paymentId: paymentId
+      });
+      console.log('📢 Real-time update sent to driver');
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Payment verified and commission cleared',
+      wallet: {
+        totalEarnings: Number(updatedWallet.totalEarnings.toFixed(2)),
+        totalCommission: Number(updatedWallet.totalCommission.toFixed(2)),
+        pendingAmount: Number(updatedWallet.pendingAmount.toFixed(2)),
+        availableBalance: Number(updatedWallet.availableBalance.toFixed(2)),
+      },
+      paymentDetails: {
+        paymentId: paymentId,
+        amount: amount,
+        method: payment.method || 'unknown',
+        timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (err) {
+    // Rollback transaction on error
+    if (session && session.inTransaction()) {
+      await session.abortTransaction();
+    }
+
+    // Remove from processing map
+    if (req.body.driverId && req.body.paymentId) {
+      paymentProcessing.delete(`${req.body.driverId}-${req.body.paymentId}`);
+    }
+
+    console.error('🔥 verifyRazorpayPayment error:', err);
+    
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        success: false, 
+        message: 'Payment verification failed',
+        error: err.message,
+        errorCode: 'VERIFICATION_FAILED'
+      });
+    }
+  } finally {
+    if (session) {
+      session.endSession();
+    }
+  }
+};
+
+/**
  * Get wallet details for a driver
  * GET /api/wallet/:driverId
  */
@@ -69,7 +502,6 @@ const getWalletByDriverId = async (req, res) => {
   try {
     const { driverId } = req.params;
 
-    // Validate driver ID format
     if (!mongoose.Types.ObjectId.isValid(driverId)) {
       return res.status(400).json({
         success: false,
@@ -79,8 +511,9 @@ const getWalletByDriverId = async (req, res) => {
 
     const wallet = await getOrCreateWallet(driverId);
 
-    // Get recent transactions (last 20)
+    // Filter only completed transactions for display
     const recentTransactions = wallet.transactions
+      .filter(t => !t.status || t.status === 'completed')
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, 20);
 
@@ -96,12 +529,65 @@ const getWalletByDriverId = async (req, res) => {
     });
   } catch (err) {
     console.error('🔥 getWalletByDriverId error:', err);
-    res.status(500).json({ success: false, message: err.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch wallet data',
+      error: err.message 
+    });
   }
 };
 
 /**
- * Process cash collection after trip completion (with transactions)
+ * Get payment proofs (for backward compatibility)
+ * GET /api/wallet/payment-proof/:driverId
+ */
+const getPaymentProofs = async (req, res) => {
+  try {
+    const { driverId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(driverId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid driver ID'
+      });
+    }
+
+    const wallet = await Wallet.findOne({ driverId });
+    
+    if (!wallet) {
+      return res.status(200).json({
+        success: true,
+        proofs: []
+      });
+    }
+
+    // Get pending transactions as "proofs"
+    const proofs = wallet.transactions
+      .filter(t => t.status === 'pending' && t.razorpayPaymentId)
+      .map(t => ({
+        amount: t.amount,
+        razorpayPaymentId: t.razorpayPaymentId,
+        razorpayOrderId: t.razorpayOrderId,
+        status: 'pending',
+        submittedAt: t.createdAt
+      }));
+
+    res.status(200).json({
+      success: true,
+      proofs
+    });
+
+  } catch (err) {
+    console.error('🔥 getPaymentProofs error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: err.message 
+    });
+  }
+};
+
+/**
+ * Process cash collection after trip completion
  * POST /api/wallet/collect-cash
  */
 const processCashCollection = async (req, res) => {
@@ -111,7 +597,6 @@ const processCashCollection = async (req, res) => {
   try {
     const { tripId, driverId } = req.body;
 
-    // Validate input
     if (!mongoose.Types.ObjectId.isValid(tripId) || !mongoose.Types.ObjectId.isValid(driverId)) {
       await session.abortTransaction();
       return res.status(400).json({
@@ -120,7 +605,6 @@ const processCashCollection = async (req, res) => {
       });
     }
 
-    // Validate trip
     const trip = await Trip.findById(tripId).session(session);
     if (!trip) {
       await session.abortTransaction();
@@ -150,7 +634,6 @@ const processCashCollection = async (req, res) => {
 
     const tripFare = trip.fare || trip.finalFare || 0;
 
-    // Validate fare
     if (tripFare <= 0) {
       await session.abortTransaction();
       return res.status(400).json({
@@ -159,10 +642,8 @@ const processCashCollection = async (req, res) => {
       });
     }
 
-    // Calculate breakdown with precision
     const fareBreakdown = calculateFareBreakdown(tripFare);
 
-    // Update wallet atomically
     const wallet = await Wallet.findOneAndUpdate(
       { driverId },
       {
@@ -180,6 +661,7 @@ const processCashCollection = async (req, res) => {
                 amount: fareBreakdown.driverEarning,
                 tripId: trip._id,
                 description: `Trip earning from ${trip.pickup.address?.substring(0, 30) || 'customer'}`,
+                status: 'completed',
                 createdAt: new Date()
               },
               {
@@ -187,6 +669,7 @@ const processCashCollection = async (req, res) => {
                 amount: fareBreakdown.commission,
                 tripId: trip._id,
                 description: `Platform commission (${COMMISSION_PERCENTAGE}%)`,
+                status: 'completed',
                 createdAt: new Date()
               }
             ]
@@ -200,16 +683,24 @@ const processCashCollection = async (req, res) => {
       }
     );
 
-    // Mark payment as collected in trip
     trip.paymentCollected = true;
     trip.paymentCollectedAt = new Date();
     await trip.save({ session });
 
-    // Commit transaction
     await session.commitTransaction();
 
-    // Get driver details for socket notification (outside transaction)
+    console.log('');
+    console.log('='.repeat(70));
+    console.log('💰 CASH COLLECTION CONFIRMED');
+    console.log(`   Trip ID: ${tripId}`);
+    console.log(`   Driver ID: ${driverId}`);
+    console.log(`   Fare: ₹${tripFare}`);
+    console.log(`   Driver Earning: ₹${fareBreakdown.driverEarning}`);
+    console.log(`   Commission: ₹${fareBreakdown.commission}`);
+    console.log('='.repeat(70));
+
     const driver = await User.findById(driverId).select('socketId').lean();
+    const customer = await User.findById(trip.customerId).select('socketId').lean();
 
     const walletInfo = {
       totalEarnings: Number(wallet.totalEarnings.toFixed(2)),
@@ -218,7 +709,6 @@ const processCashCollection = async (req, res) => {
       availableBalance: Number(wallet.availableBalance.toFixed(2)),
     };
 
-    // Notify driver via socket
     if (driver?.socketId) {
       io.to(driver.socketId).emit('wallet:updated', {
         fareBreakdown: {
@@ -230,9 +720,27 @@ const processCashCollection = async (req, res) => {
         wallet: walletInfo,
         message: 'Cash collected successfully',
       });
+      console.log(`📢 wallet:updated emitted to driver ${driverId}`);
     }
 
-    console.log(`✅ Cash collected for trip ${tripId}: ₹${tripFare} (Driver: ₹${fareBreakdown.driverEarning}, Commission: ₹${fareBreakdown.commission})`);
+    if (customer?.socketId) {
+      io.to(customer.socketId).emit('trip:cash_collected', {
+        tripId: tripId.toString(),
+        message: 'Payment confirmed. Thank you for riding with us!',
+        timestamp: new Date().toISOString()
+      });
+      console.log(`📢 trip:cash_collected emitted to customer ${trip.customerId}`);
+    }
+
+    await User.findByIdAndUpdate(driverId, {
+      $set: { 
+        currentTripId: null,
+        isBusy: false,
+        canReceiveNewRequests: false
+      }
+    });
+    console.log(`✅ Driver ${driverId} status cleared`);
+    console.log('='.repeat(70));
 
     res.status(200).json({
       success: true,
@@ -246,13 +754,11 @@ const processCashCollection = async (req, res) => {
       wallet: walletInfo,
     });
   } catch (err) {
-    // Only abort if transaction is still active
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
     console.error('🔥 processCashCollection error:', err);
     
-    // Only send response if not already sent
     if (!res.headersSent) {
       res.status(500).json({ 
         success: false, 
@@ -264,250 +770,11 @@ const processCashCollection = async (req, res) => {
     session.endSession();
   }
 };
-/**
- * Add manual transaction (for admin/testing)
- * POST /api/wallet/add-transaction
- */
-const addTransaction = async (req, res) => {
-  try {
-    const { driverId, type, amount, description } = req.body;
 
-    if (!['credit', 'debit', 'commission'].includes(type)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid transaction type'
-      });
-    }
-
-    if (!amount || amount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Amount must be greater than zero'
-      });
-    }
-
-    const wallet = await getOrCreateWallet(driverId);
-
-    // Check balance for debit
-    if (type === 'debit' && wallet.availableBalance < amount) {
-      return res.status(400).json({
-        success: false,
-        message: 'Insufficient balance'
-      });
-    }
-
-    // Prepare update operations
-    const updateOps = {
-      $push: {
-        transactions: {
-          type,
-          amount: Number(amount.toFixed(2)),
-          description: description || `${type} transaction`,
-          createdAt: new Date()
-        }
-      }
-    };
-
-    // Update balances based on type
-    if (type === 'credit') {
-      updateOps.$inc = {
-        totalEarnings: amount,
-        availableBalance: amount
-      };
-    } else if (type === 'debit') {
-      updateOps.$inc = {
-        availableBalance: -amount
-      };
-    } else if (type === 'commission') {
-      updateOps.$inc = {
-        totalCommission: amount,
-        pendingAmount: amount
-      };
-    }
-
-    const updatedWallet = await Wallet.findOneAndUpdate(
-      { driverId },
-      updateOps,
-      { new: true }
-    );
-
-    res.status(200).json({
-      success: true,
-      message: 'Transaction added successfully',
-      wallet: {
-        totalEarnings: Number(updatedWallet.totalEarnings.toFixed(2)),
-        totalCommission: Number(updatedWallet.totalCommission.toFixed(2)),
-        pendingAmount: Number(updatedWallet.pendingAmount.toFixed(2)),
-        availableBalance: Number(updatedWallet.availableBalance.toFixed(2)),
-      },
-    });
-  } catch (err) {
-    console.error('🔥 addTransaction error:', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-/**
- * Get transaction history with pagination
- * GET /api/wallet/:driverId/transactions?page=1&limit=20
- */
-const getTransactionHistory = async (req, res) => {
-  try {
-    const { driverId } = req.params;
-    const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
-    const skip = (page - 1) * limit;
-
-    const wallet = await getOrCreateWallet(driverId);
-
-    const transactions = wallet.transactions
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-      .slice(skip, skip + limit);
-
-    const totalTransactions = wallet.transactions.length;
-    const totalPages = Math.ceil(totalTransactions / limit);
-
-    res.status(200).json({
-      success: true,
-      transactions,
-      pagination: {
-        currentPage: page,
-        totalPages,
-        totalTransactions,
-        hasMore: page < totalPages,
-      },
-    });
-  } catch (err) {
-    console.error('🔥 getTransactionHistory error:', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-/**
- * Pay pending commission (admin/settlement)
- * POST /api/wallet/settle-commission
- */
-const settleCommission = async (req, res) => {
-  try {
-    const { driverId, amount } = req.body;
-
-    if (!amount || amount <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Amount must be greater than zero'
-      });
-    }
-
-    const wallet = await getOrCreateWallet(driverId);
-
-    if (amount > wallet.pendingAmount) {
-      return res.status(400).json({
-        success: false,
-        message: `Amount exceeds pending commission (₹${wallet.pendingAmount.toFixed(2)})`
-      });
-    }
-
-    const updatedWallet = await Wallet.findOneAndUpdate(
-      { driverId },
-      {
-        $inc: { pendingAmount: -amount },
-        $push: {
-          transactions: {
-            type: 'debit',
-            amount: Number(amount.toFixed(2)),
-            description: 'Commission settlement',
-            createdAt: new Date()
-          }
-        }
-      },
-      { new: true }
-    );
-
-    res.status(200).json({
-      success: true,
-      message: 'Commission settled successfully',
-      wallet: {
-        totalEarnings: Number(updatedWallet.totalEarnings.toFixed(2)),
-        totalCommission: Number(updatedWallet.totalCommission.toFixed(2)),
-        pendingAmount: Number(updatedWallet.pendingAmount.toFixed(2)),
-        availableBalance: Number(updatedWallet.availableBalance.toFixed(2)),
-      },
-    });
-  } catch (err) {
-    console.error('🔥 settleCommission error:', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-
-/**
- * Get wallet statistics
- * GET /api/wallet/:driverId/stats
- */
-const getWalletStats = async (req, res) => {
-  try {
-    const { driverId } = req.params;
-
-    const wallet = await getOrCreateWallet(driverId);
-
-    // Calculate stats from transactions
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const thisWeek = new Date();
-    thisWeek.setDate(thisWeek.getDate() - 7);
-
-    const thisMonth = new Date();
-    thisMonth.setDate(1);
-    thisMonth.setHours(0, 0, 0, 0);
-
-    const todayEarnings = wallet.transactions
-      .filter(t => t.type === 'credit' && new Date(t.createdAt) >= today)
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    const weekEarnings = wallet.transactions
-      .filter(t => t.type === 'credit' && new Date(t.createdAt) >= thisWeek)
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    const monthEarnings = wallet.transactions
-      .filter(t => t.type === 'credit' && new Date(t.createdAt) >= thisMonth)
-      .reduce((sum, t) => sum + t.amount, 0);
-
-    const completedTrips = await Trip.countDocuments({
-      assignedDriver: driverId,
-      status: 'completed',
-    });
-
-    res.status(200).json({
-      success: true,
-      stats: {
-        totalEarnings: Number(wallet.totalEarnings.toFixed(2)),
-        totalCommission: Number(wallet.totalCommission.toFixed(2)),
-        pendingAmount: Number(wallet.pendingAmount.toFixed(2)),
-        availableBalance: Number(wallet.availableBalance.toFixed(2)),
-        todayEarnings: Number(todayEarnings.toFixed(2)),
-        weekEarnings: Number(weekEarnings.toFixed(2)),
-        monthEarnings: Number(monthEarnings.toFixed(2)),
-        completedTrips,
-      },
-    });
-  } catch (err) {
-    console.error('🔥 getWalletStats error:', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-};
-/**
- * Get today's earnings breakdown for driver dashboard
- * GET /api/wallet/:driverId/today
- */
-/**
- * Get today's earnings breakdown for driver dashboard
- * GET /api/wallet/today/:driverId
- */
 const getTodayEarnings = async (req, res) => {
   try {
     const { driverId } = req.params;
 
-    // Validate driver ID format
     if (!mongoose.Types.ObjectId.isValid(driverId)) {
       return res.status(400).json({
         success: false,
@@ -517,20 +784,19 @@ const getTodayEarnings = async (req, res) => {
 
     const wallet = await getOrCreateWallet(driverId);
 
-    // Get start and end of today
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     
     const endOfDay = new Date();
     endOfDay.setHours(23, 59, 59, 999);
 
-    // Filter today's transactions
     const todayTransactions = wallet.transactions.filter(t => {
       const transactionDate = new Date(t.createdAt);
-      return transactionDate >= startOfDay && transactionDate <= endOfDay;
+      return transactionDate >= startOfDay && 
+             transactionDate <= endOfDay &&
+             (!t.status || t.status === 'completed');
     });
 
-    // Calculate today's totals
     let totalFares = 0;
     let totalCommission = 0;
     let tripsCompleted = 0;
@@ -539,7 +805,6 @@ const getTodayEarnings = async (req, res) => {
     todayTransactions.forEach(transaction => {
       if (transaction.type === 'credit') {
         totalFares += transaction.amount;
-        // Count unique trips
         if (transaction.tripId && !tripIds.has(transaction.tripId.toString())) {
           tripIds.add(transaction.tripId.toString());
           tripsCompleted++;
@@ -549,10 +814,8 @@ const getTodayEarnings = async (req, res) => {
       }
     });
 
-    const netEarnings = totalFares; // Total fares already has commission deducted
+    const netEarnings = totalFares;
 
-    // Get today's completed trips count from database (more accurate)
-    // ✅ UPDATED QUERY - Uses completedAt OR rideEndTime
     const todayTripsCount = await Trip.countDocuments({
       assignedDriver: driverId,
       status: 'completed',
@@ -562,7 +825,6 @@ const getTodayEarnings = async (req, res) => {
       ]
     });
 
-    // Use the higher count (in case of data inconsistency)
     const finalTripsCount = Math.max(tripsCompleted, todayTripsCount);
 
     res.status(200).json({
@@ -572,7 +834,7 @@ const getTodayEarnings = async (req, res) => {
         totalCommission: Number(totalCommission.toFixed(2)),
         netEarnings: Number(netEarnings.toFixed(2)),
         tripsCompleted: finalTripsCount,
-        date: new Date().toISOString().split('T')[0], // YYYY-MM-DD
+        date: new Date().toISOString().split('T')[0],
         breakdown: {
           commissionPercentage: COMMISSION_PERCENTAGE,
           averagePerTrip: finalTripsCount > 0 
@@ -590,14 +852,26 @@ const getTodayEarnings = async (req, res) => {
     });
   }
 };
+
+// Cleanup old processing entries (run periodically)
+setInterval(() => {
+  const now = Date.now();
+  const timeout = 10 * 60 * 1000; // 10 minutes
+  
+  for (const [key, timestamp] of paymentProcessing.entries()) {
+    if (now - timestamp > timeout) {
+      paymentProcessing.delete(key);
+      console.log('🧹 Cleaned up stale payment processing entry:', key);
+    }
+  }
+}, 5 * 60 * 1000); // Run every 5 minutes
+
 export {
   getWalletByDriverId,
   processCashCollection,
-  addTransaction,
-  getTransactionHistory,
-  settleCommission,
-  getWalletStats,
+  getTodayEarnings,
+  createRazorpayOrder,
+  verifyRazorpayPayment,
+  getPaymentProofs,
   getOrCreateWallet,
-    getTodayEarnings, // ✅ ADD THIS
-
 };

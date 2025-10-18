@@ -1,6 +1,9 @@
 // src/server.js
 import express from 'express';
 import cors from 'cors';
+import cron from 'node-cron';
+import { cleanupStuckDrivers } from './jobs/driverCleanup.js';
+import User from './models/User.js'
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import { createServer } from 'http';
@@ -16,6 +19,8 @@ import rideHistoryRoutes from './routes/rideHistoryRoutes.js';
 import locationRoutes from './routes/locationRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import tripRoutes from './routes/tripRoutes.js';
+import healthRoutes from './routes/healthRoutes.js';  // ✅ NEW
+
 import standbyReassignCron from './cron/standbyReassignCron.js';
 import { initSocket } from './socket/socketHandler.js';
 import walletRoutes from './routes/walletRoutes.js'; // 👈 1. IMPORT THE NEW FILE
@@ -55,6 +60,8 @@ app.use('/api', rideHistoryRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/trip', tripRoutes);
+app.use('/api', healthRoutes);  // ✅ NEW
+
 app.use('/api/wallet', walletRoutes); // 👈 2. ADD THIS LINE
 
 // ✅ Socket.IO Init
@@ -78,6 +85,51 @@ app.use((err, req, res, _next) => {
     message: err.message || '🚨 Internal Server Error',
   });
 });
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    console.log('🔍 Running driver availability cleanup...');
+    
+    // Find drivers who are marked busy but have no active trip
+    const stuckDrivers = await User.find({
+      isDriver: true,
+      isBusy: true,
+      $or: [
+        { currentTripId: null },
+        { currentTripId: { $exists: false } }
+      ]
+    });
+    
+    if (stuckDrivers.length > 0) {
+      console.log(`⚠️ Found ${stuckDrivers.length} drivers stuck in busy state`);
+      
+      for (const driver of stuckDrivers) {
+        // Check if they have any active trips
+        const activeTrip = await Trip.findOne({
+          assignedDriver: driver._id,
+          status: { $in: ['driver_assigned', 'ride_started'] }
+        });
+        
+        if (!activeTrip) {
+          // Safe to reset
+          await User.findByIdAndUpdate(driver._id, {
+            $set: {
+              isBusy: false,
+              currentTripId: null,
+              canReceiveNewRequests: false
+            }
+          });
+          console.log(`✅ Reset stuck driver: ${driver.name} (${driver._id})`);
+        }
+      }
+    } else {
+      console.log('✅ All drivers have correct availability status');
+    }
+    
+  } catch (error) {
+    console.error('❌ Cleanup job error:', error);
+  }
+});
+cron.schedule('*/5 * * * *', cleanupStuckDrivers);
 
 // ✅ Start Server
 const PORT = process.env.PORT || 5002;

@@ -7,6 +7,11 @@ const tripSchema = new mongoose.Schema({
     ref: 'User',
     required: true,
   },
+  expiresAt: {
+    type: Date,
+    default: () => new Date(Date.now() + 10000),  // 10 seconds from creation
+    index: true,
+  },
   assignedDriver: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -46,10 +51,13 @@ const tripSchema = new mongoose.Schema({
     required: true,
   },
   
-  // ✅ ADD vehicleType field
+  // ✅ FIXED: Make vehicleType conditionally required
   vehicleType: {
     type: String,
-    required: true,
+    required: function() {
+      // Only required if status is not cancelled or timeout
+      return !['cancelled', 'timeout'].includes(this.status);
+    }
   },
 
   // Canonical GeoJSON fields used across controllers
@@ -86,10 +94,13 @@ const tripSchema = new mongoose.Schema({
   duration: Number, // in mins
   tripTime: Date, // for scheduled trips (long)
   
-  // ✅ ADD FARE FIELDS
+  // ✅ FIXED: Make fare conditionally required
   fare: {
     type: Number,
-    required: true,
+    required: function() {
+      // Only required if status is not cancelled or timeout
+      return !['cancelled', 'timeout'].includes(this.status);
+    },
     min: 0,
   },
   estimatedFare: {
@@ -134,7 +145,6 @@ const tripSchema = new mongoose.Schema({
     default: null,
   },
   
-  // ✅ ADD TIMESTAMPS
   acceptedAt: {
     type: Date,
     default: null,
@@ -148,25 +158,29 @@ const tripSchema = new mongoose.Schema({
     default: null,
   },
   
-  // ✅ ADD PAYMENT FIELDS
+  // Payment fields
   paymentCollected: {
     type: Boolean,
     default: false,
   },
+  paymentCollectedAt: {
+  type: Date,
+  default: null
+},
   paymentMethod: {
     type: String,
     enum: ['Cash', 'Online', 'Wallet'],
     default: 'Cash',
   },
   
-  // ✅ ADD PARCEL FIELDS (for parcel trips)
+  // Parcel fields (for parcel trips)
   parcelDetails: {
     weight: String,
     dimensions: String,
     description: String,
   },
   
-  // ✅ ADD LONG TRIP FIELDS
+  // Long trip fields
   isSameDay: {
     type: Boolean,
     default: false,
@@ -180,11 +194,36 @@ const tripSchema = new mongoose.Schema({
     min: 1,
   },
   
+  // ✅ ADD cancellation timestamp
   cancelledBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
   },
+  cancelledAt: {
+    type: Date,
+    default: null,
+  },
   
+  // Notification tracking (for retry system)
+  customerNotified: {
+    type: Boolean,
+    default: false,
+  },
+  notificationRetries: {
+    type: Number,
+    default: 0,
+  },
+  lastNotificationAttempt: {
+    type: Date,
+    default: null,
+  },
+  
+  // Driver heartbeat tracking (crash detection)
+  lastDriverHeartbeat: {
+    type: Date,
+    default: null,
+  },
+
   createdAt: {
     type: Date,
     default: Date.now,
@@ -193,13 +232,28 @@ const tripSchema = new mongoose.Schema({
   timestamps: true, // Adds createdAt and updatedAt automatically
 });
 
+// ✅ ADD: Pre-save hook to handle cancellation gracefully
+tripSchema.pre('save', function(next) {
+  // If trip is being cancelled, don't validate fare and vehicleType
+  if (this.isModified('status') && ['cancelled', 'timeout'].includes(this.status)) {
+    // Mark these fields as not requiring validation
+    this.$__.skipValidation = this.$__.skipValidation || {};
+    this.$__.skipValidation.fare = true;
+    this.$__.skipValidation.vehicleType = true;
+  }
+  next();
+});
+
 // Ensure geospatial indexes
 tripSchema.index({ 'pickup.coordinates': '2dsphere' });
 tripSchema.index({ 'drop.coordinates': '2dsphere' });
 
-// Add index for status queries
+// Add indexes for faster queries
 tripSchema.index({ status: 1 });
 tripSchema.index({ customerId: 1 });
 tripSchema.index({ assignedDriver: 1 });
+tripSchema.index({ customerId: 1, status: 1 });
+tripSchema.index({ assignedDriver: 1, status: 1 });
+tripSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 export default mongoose.model('Trip', tripSchema);
