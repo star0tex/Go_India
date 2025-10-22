@@ -1,10 +1,10 @@
 import express from "express";
 import { uploadDriverProfilePhoto } from "../controllers/driverProfileController.js";
-import { uploadDriverDocument, getDriverDocuments, getDriverById } from "../controllers/documentController.js";
+import { uploadDriverDocument, getDriverDocuments, getDriverById, getDriverProfile } from "../controllers/documentController.js";
 import { protect } from "../middlewares/authMiddleware.js";
 import { uploadDocument, uploadProfilePhoto } from "../middlewares/multer.js";
 import { updateDriverVehicleType } from "../controllers/driverController.js";
-import User from "../models/User.js"; // ✅ Import User model for nearby drivers query
+import User from "../models/User.js";
 
 const router = express.Router();
 
@@ -12,15 +12,11 @@ const router = express.Router();
  * @route   GET /api/driver/nearby
  * @desc    Get nearby online drivers within specified radius
  * @access  Protected
- * @query   lat (required) - Latitude
- * @query   lng (required) - Longitude  
- * @query   radius (optional) - Search radius in km (default: 2)
  */
 router.get("/nearby", protect, async (req, res) => {
   try {
     const { lat, lng, radius = 2 } = req.query;
 
-    // Validate required parameters
     if (!lat || !lng) {
       return res.status(400).json({
         success: false,
@@ -28,7 +24,6 @@ router.get("/nearby", protect, async (req, res) => {
       });
     }
 
-    // Parse and validate numeric values
     const latitude = parseFloat(lat);
     const longitude = parseFloat(lng);
     const radiusKm = parseFloat(radius);
@@ -40,7 +35,6 @@ router.get("/nearby", protect, async (req, res) => {
       });
     }
 
-    // Validate coordinate ranges
     if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
       return res.status(400).json({
         success: false,
@@ -50,7 +44,6 @@ router.get("/nearby", protect, async (req, res) => {
 
     console.log(`🔍 Searching for drivers near: [${latitude}, ${longitude}] within ${radiusKm}km`);
 
-    // Find nearby online drivers using geospatial query
     const drivers = await User.find({
       isDriver: true,
       isOnline: true,
@@ -58,25 +51,24 @@ router.get("/nearby", protect, async (req, res) => {
         $near: {
           $geometry: {
             type: 'Point',
-            coordinates: [longitude, latitude], // GeoJSON format: [lng, lat]
+            coordinates: [longitude, latitude],
           },
-          $maxDistance: radiusKm * 1000, // Convert km to meters
+          $maxDistance: radiusKm * 1000,
         },
       },
     })
     .select('name phone vehicleType location rating vehicleBrand vehicleNumber')
-    .limit(50) // Limit to 50 nearest drivers
+    .limit(50)
     .lean();
 
     console.log(`✅ Found ${drivers.length} nearby drivers`);
 
-    // Format response for Flutter app
     const formattedDrivers = drivers.map(driver => ({
       id: driver._id.toString(),
       name: driver.name || 'Driver',
       phone: driver.phone || '',
       vehicleType: driver.vehicleType || 'bike',
-      lat: driver.location.coordinates[1], // Convert to [lat, lng] for Flutter
+      lat: driver.location.coordinates[1],
       lng: driver.location.coordinates[0],
       rating: driver.rating || 4.5,
       vehicleBrand: driver.vehicleBrand || '',
@@ -88,7 +80,6 @@ router.get("/nearby", protect, async (req, res) => {
   } catch (error) {
     console.error('❌ Error in /api/driver/nearby:', error);
     
-    // Handle specific MongoDB errors
     if (error.name === 'MongoError' && error.code === 27) {
       return res.status(500).json({
         success: false,
@@ -106,6 +97,14 @@ router.get("/nearby", protect, async (req, res) => {
 });
 
 /**
+ * @route   GET /api/driver/profile
+ * @desc    Get authenticated driver's own profile
+ * @access  Protected
+ * 🔥 IMPORTANT: This route MUST come before /:driverId to avoid conflicts
+ */
+router.get("/profile", protect, getDriverProfile);
+
+/**
  * @route   POST /api/driver/setVehicleType
  * @desc    Update driver's vehicle type
  * @access  Protected
@@ -113,16 +112,10 @@ router.get("/nearby", protect, async (req, res) => {
 router.post("/setVehicleType", protect, updateDriverVehicleType);
 
 /**
- * @route   GET /api/driver/:driverId
- * @desc    Get driver details by ID
- * @access  Protected
- */
-router.get("/:driverId", protect, getDriverById);
-
-/**
  * @route   GET /api/driver/documents/:driverId
  * @desc    Get driver documents by driver ID
  * @access  Protected
+ * 🔥 IMPORTANT: This route MUST come before /:driverId to avoid conflicts
  */
 router.get("/documents/:driverId", protect, getDriverDocuments);
 
@@ -149,5 +142,13 @@ router.post(
   uploadDocument.single("document"),
   uploadDriverDocument
 );
+
+/**
+ * @route   GET /api/driver/:driverId
+ * @desc    Get driver details by ID
+ * @access  Protected
+ * 🔥 IMPORTANT: This route should come LAST among GET routes to avoid capturing other paths
+ */
+router.get("/:driverId", protect, getDriverById);
 
 export default router;

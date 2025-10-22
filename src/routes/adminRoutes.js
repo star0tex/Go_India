@@ -1,50 +1,71 @@
-// src/routes/adminRoutes.js
-
 import express from "express";
+import { verifyAdminToken } from "../middlewares/adminAuth.js";
 import {
+  // Dashboard
+  getDashboardStats,
+
+  // Auth
+  adminLogin,
+
+  // Trips
+  manualAssignDriver,
+  getTripDetails,
+  getAllTrips,
+  markTripCompleted,
+  cancelTrip,
+
+  // Users
+  getAllDrivers,
+  getAllCustomers,
+  blockCustomer,
+  unblockCustomer,
+  blockDriver,
+  unblockDriver,
+
+  // Push Notification
+  sendPushToUsers,
+  sendPushToIndividual,
+
+  // Documents
   getDriverDocuments,
   verifyDriverDocument,
-  getTripDetails,
-  manualAssignDriver,
-  sendPushToUsers,
+  getPendingDocuments,
+  getDocumentById,
 } from "../controllers/adminController.js";
-import { protect, adminOnly } from "../middlewares/authMiddleware.js";
 
 const router = express.Router();
 
-/**
- * @route   GET /api/admin/trip/:tripId
- * @desc    Fetch trip + driver + customer info
- * @access  Private (Admin only)
- */
-router.get("/trip/:tripId", protect, adminOnly, getTripDetails);
+// 🟡 Admin Login (Public)
+router.post("/login", adminLogin);
 
-/**
- * @route   POST /api/admin/manual-assign
- * @desc    Admin manually assigns a driver to a trip
- * @access  Private (Admin only)
- */
-router.post("/manual-assign", protect, adminOnly, manualAssignDriver);
+// 🟢 Dashboard Stats
+router.get("/stats", verifyAdminToken, getDashboardStats);
 
-/**
- * @route   POST /api/admin/send-fcm
- * @desc    Admin sends push notification to users (offers, updates, etc.)
- * @access  Private (Admin only)
- */
-router.post("/send-fcm", protect, adminOnly, sendPushToUsers);
+// 🧍 Customers
+router.get("/customers", verifyAdminToken, getAllCustomers);
+router.put("/customer/block/:customerId", verifyAdminToken, blockCustomer);
+router.put("/customer/unblock/:customerId", verifyAdminToken, unblockCustomer);
 
-/**
- * @route   GET /api/admin/documents/:driverId
- * @desc    Fetch all uploaded documents by a specific driver
- * @access  Private (Admin only)
- */
-router.get("/documents/:driverId", protect, adminOnly, getDriverDocuments);
+// 🚖 Drivers
+router.get("/drivers", verifyAdminToken, getAllDrivers);
+router.put("/driver/block/:driverId", verifyAdminToken, blockDriver);
+router.put("/driver/unblock/:driverId", verifyAdminToken, unblockDriver);
 
-/**
- * @route   PUT /api/admin/verifyDocument/:docId
- * @desc    Verify or reject a specific document with optional remarks
- * @access  Private (Admin only)
- */
-router.put("/verifyDocument/:docId", protect, adminOnly, verifyDriverDocument);
+// 🚘 Trips
+router.get("/trips", verifyAdminToken, getAllTrips);
+router.post("/manual-assign", verifyAdminToken, manualAssignDriver);
+router.get("/trip/:tripId", verifyAdminToken, getTripDetails);
+router.put("/trip/:tripId/complete", verifyAdminToken, markTripCompleted);
+router.put("/trip/:tripId/cancel", verifyAdminToken, cancelTrip);
+
+// 📨 Push Notifications
+router.post("/send-fcm", verifyAdminToken, sendPushToUsers);
+router.post("/send-fcm/individual", verifyAdminToken, sendPushToIndividual);
+
+// 📄 Documents
+router.get("/documents/pending", verifyAdminToken, getPendingDocuments);
+router.get("/documents/:driverId", verifyAdminToken, getDriverDocuments);
+router.get("/document/:docId", verifyAdminToken, getDocumentById);
+router.put("/verifyDocument/:docId", verifyAdminToken, verifyDriverDocument);
 
 export default router;

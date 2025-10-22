@@ -2,13 +2,12 @@
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { v4 as uuidv4 } from "uuid";
 
 // ─────────────────────────────────────────────
-// 📁 1. Disk storage for driver documents
+// 📁 1. Disk storage for driver documents with phone number
 const documentStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-   const dir = "uploads/documents";
+    const dir = "uploads/documents";
 
     // ✅ Create directory if it doesn't exist
     if (!fs.existsSync(dir)) {
@@ -18,8 +17,29 @@ const documentStorage = multer.diskStorage({
     cb(null, dir);
   },
   filename: (req, file, cb) => {
-    const uniqueName = `${uuidv4()}${path.extname(file.originalname)}`;
-    cb(null, uniqueName);
+    try {
+      // Get phone number from authenticated user or request body
+      const phoneNumber = req.user?.phoneNumber || req.body.phoneNumber;
+      const docType = req.body.docType || 'document';
+      const docSide = req.body.docSide || 'unknown';
+      
+      if (!phoneNumber) {
+        return cb(new Error("Phone number is required"));
+      }
+
+      // Get file extension
+      const ext = path.extname(file.originalname);
+      
+      // Format: phoneNumber_docType_side.ext
+      // Example: 8331134126_RC_front.jpg
+      const filename = `${phoneNumber}_${docType.toUpperCase()}_${docSide}${ext}`;
+      
+      console.log(`📝 Saving document as: ${filename}`);
+      cb(null, filename);
+    } catch (error) {
+      console.error("❌ Error generating filename:", error);
+      cb(error);
+    }
   },
 });
 
@@ -31,7 +51,7 @@ export const uploadDocument = multer({
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error("Only JPEG, PNG, and PDF files are allowed."));
+      cb(new Error("Only JPEG, PNG, and WEBP files are allowed."));
     }
   },
 });
@@ -44,7 +64,7 @@ export const uploadProfilePhoto = multer({
   storage: profilePhotoStorage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
   fileFilter: (req, file, cb) => {
-        console.log("Received file type:", file.mimetype);
+    console.log("Received file type:", file.mimetype);
     const allowedTypes = ["image/jpeg", "image/png"];
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);

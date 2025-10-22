@@ -1,6 +1,7 @@
-// src/socket/socketHandler.js
 import User from '../models/User.js';
 import Trip from '../models/Trip.js';
+import mongoose from 'mongoose';
+import ChatMessageModel from '../models/ChatMessage.js';
 import { startNotificationRetryJob } from '../utils/notificationRetry.js';
 import { startStaleTripCleanup } from '../utils/staleTripsCleanup.js';
 import { sendToDriver } from '../utils/fcmSender.js';
@@ -11,6 +12,8 @@ import {
   createLongTrip,
 } from '../controllers/tripController.js';
 import { emitTripError } from '../utils/errorEmitter.js';
+
+const ChatMessage = mongoose.models.ChatMessage || ChatMessageModel;
 
 let io;
 
@@ -24,34 +27,9 @@ const DISTANCE_LIMITS = {
   long_multi_day: 50000,
 };
 
-/**
- * Resolve user by MongoDB _id, Firebase UID, or phone number
- * Always returns the user with MongoDB _id
- */
-const resolveUserByIdOrPhone = async (idOrPhone) => {
-  if (!idOrPhone) return null;
-  
-  try {
-    // Try MongoDB ObjectId format
-    if (typeof idOrPhone === 'string' && /^[0-9a-fA-F]{24}$/.test(idOrPhone)) {
-      const byId = await User.findById(idOrPhone);
-      if (byId) return byId;
-    }
-    
-    // Try Firebase UID
-    const byFirebaseUid = await User.findOne({ firebaseUid: idOrPhone });
-    if (byFirebaseUid) return byFirebaseUid;
-    
-    // Try phone number (normalize it)
-    const normalizedPhone = String(idOrPhone).replace(/[^0-9]/g, "");
-    const byPhone = await User.findOne({ phone: normalizedPhone });
-    if (byPhone) return byPhone;
-    
-    return null;
-  } catch (err) {
-    console.error('❌ resolveUserByIdOrPhone error:', err);
-    return null;
-  }
+const normalizePhone = (phone) => {
+  if (!phone) return null;
+  return String(phone).replace(/[^0-9]/g, "");
 };
 
 const validateTripPayload = (payload) => {
@@ -63,14 +41,35 @@ const validateTripPayload = (payload) => {
   return true;
 };
 
-const normalizePhone = (phone) => {
-  if (!phone) return null;
-  return String(phone).replace(/[^0-9]/g, "");
+const resolveUserByIdOrPhone = async (idOrPhone) => {
+  if (!idOrPhone) return null;
+
+  try {
+    if (typeof idOrPhone === 'string' && /^[0-9a-fA-F]{24}$/.test(idOrPhone)) {
+      const byId = await User.findById(idOrPhone);
+      if (byId) return byId;
+    }
+
+    const byFirebaseUid = await User.findOne({ firebaseUid: idOrPhone });
+    if (byFirebaseUid) return byFirebaseUid;
+
+    const normalizedPhone = normalizePhone(idOrPhone);
+    const byPhone = await User.findOne({ phone: normalizedPhone });
+    if (byPhone) return byPhone;
+
+    return null;
+  } catch (err) {
+    console.error('❌ resolveUserByIdOrPhone error:', err);
+    return null;
+  }
 };
 
-// ✅ Helper functions for distance calculation
+// Helper functions for distance calculation
+function toRad(value) {
+  return value * Math.PI / 180;
+}
 function calculateDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371; // Earth radius in km
+  const R = 6371; // km
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
@@ -78,11 +77,7 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c; // Distance in km
-}
-
-function toRad(value) {
-  return value * Math.PI / 180;
+  return R * c; // km
 }
 
 /**
@@ -94,9 +89,7 @@ export const initSocket = (ioInstance) => {
   io.on('connection', (socket) => {
     console.log(`🟢 New connection: ${socket.id}`);
 
-    // ========================================
-    // 🔹 DRIVER STATUS UPDATE
-    // ========================================
+    // DRIVER STATUS UPDATE
     socket.on('updateDriverStatus', async (payload = {}) => {
       try {
         const {
@@ -171,68 +164,36 @@ export const initSocket = (ioInstance) => {
       }
     });
 
-    // ========================================
-    // 🔹 DRIVER RECONNECT WITH ACTIVE TRIP
-    // ========================================
+    // DRIVER RECONNECT WITH ACTIVE TRIP
     socket.on('driver:reconnect_with_trip', async ({ driverId, tripId }) => {
       try {
-        console.log('');
-        console.log('='.repeat(70));
-        console.log('🔄 DRIVER RECONNECTING WITH ACTIVE TRIP');
-        console.log(`   Driver ID: ${driverId}`);
-        console.log(`   Trip ID: ${tripId}`);
-        console.log('='.repeat(70));
-        
-        // Verify driver
+        console.log('🔄 DRIVER RECONNECTING WITH ACTIVE TRIP', driverId, tripId);
+
         const driver = await User.findById(driverId).lean();
         if (!driver) {
-          console.log('❌ Driver not found');
-          socket.emit('reconnect:failed', {
-            message: 'Driver not found'
-          });
+          socket.emit('reconnect:failed', { message: 'Driver not found' });
           return;
         }
-        
-        // Verify trip is still active
+
         const trip = await Trip.findById(tripId).lean();
         if (!trip) {
-          console.log('❌ Trip not found');
-          socket.emit('reconnect:failed', {
-            message: 'Trip not found',
-            shouldClearTrip: true
-          });
+          socket.emit('reconnect:failed', { message: 'Trip not found', shouldClearTrip: true });
           return;
         }
-        
-        // Check if trip is still in progress
+
         const activeStatuses = ['driver_assigned', 'driver_going_to_pickup', 'driver_at_pickup', 'ride_started'];
         if (!activeStatuses.includes(trip.status)) {
-          console.log(`⚠️ Trip status is: ${trip.status} - not active`);
-          socket.emit('reconnect:failed', {
-            message: `Trip is ${trip.status}`,
-            shouldClearTrip: true,
-            tripStatus: trip.status
-          });
+          socket.emit('reconnect:failed', { message: `Trip is ${trip.status}`, shouldClearTrip: true, tripStatus: trip.status });
           return;
         }
-        
-        // Update driver socket ID
-        await User.findByIdAndUpdate(driverId, {
-          $set: { socketId: socket.id }
-        });
-        
-        // Re-map socket connection
+
+        await User.findByIdAndUpdate(driverId, { $set: { socketId: socket.id } });
         connectedDrivers.set(socket.id, driverId.toString());
-        
-        console.log('✅ Driver reconnected successfully');
-        console.log(`   Trip Status: ${trip.status}`);
-        console.log(`   OTP: ${trip.otp}`);
-        
-        // Send trip details back to driver
+
         const customer = await User.findById(trip.customerId)
           .select('name phone photoUrl rating')
           .lean();
-        
+
         socket.emit('reconnect:success', {
           tripId: trip._id.toString(),
           status: trip.status,
@@ -259,47 +220,23 @@ export const initSocket = (ioInstance) => {
             rating: customer.rating
           } : null
         });
-        
-        console.log('📢 Sent reconnect:success to driver');
-        console.log('='.repeat(70));
-        console.log('');
-        
+
       } catch (e) {
         console.error('❌ driver:reconnect_with_trip error:', e);
-        socket.emit('reconnect:failed', {
-          message: 'Reconnection failed',
-          error: e.message
-        });
+        socket.emit('reconnect:failed', { message: 'Reconnection failed', error: e.message });
       }
     });
 
-    // ========================================
-    // 🔹 CUSTOMER REGISTER
-    // ========================================
+    // CUSTOMER REGISTER
     socket.on('customer:register', async ({ customerId }) => {
       try {
         if (!customerId) {
-          console.warn('⚠️ customer:register - customerId missing');
-          socket.emit('customer:registered', { 
-            success: false, 
-            error: 'customerId missing' 
-          });
+          socket.emit('customer:registered', { success: false, error: 'customerId missing' });
           return;
         }
 
-        console.log(`👤 Customer register request: ${customerId} on socket: ${socket.id}`);
-
-        // Resolve user by MongoDB _id, Firebase UID, or phone
         const user = await resolveUserByIdOrPhone(customerId);
-
         if (!user) {
-          console.warn(`❌ customer:register - user not found for ${customerId}`);
-          
-          // Log what we tried to search with
-          console.log(`🔍 Searched with: ${customerId}`);
-          console.log(`🔍 Format check - MongoDB ID: ${/^[0-9a-fA-F]{24}$/.test(customerId)}`);
-          console.log(`🔍 Format check - Phone-like: ${/^\d{10}$/.test(customerId)}`);
-          
           socket.emit('customer:registered', {
             success: false,
             error: 'User not found in database',
@@ -309,44 +246,20 @@ export const initSocket = (ioInstance) => {
           return;
         }
 
-        // Clean up any old socket entries for this customer
-        let removedOldSockets = 0;
         for (const [existingSocketId, existingCustomerId] of connectedCustomers.entries()) {
           if (existingCustomerId === user._id.toString()) {
-            console.log(`🗑️ Removing old socket entry: ${existingSocketId}`);
             connectedCustomers.delete(existingSocketId);
-            removedOldSockets++;
           }
         }
 
-        if (removedOldSockets > 0) {
-          console.log(`🧹 Cleaned up ${removedOldSockets} old socket(s) for customer ${user._id}`);
-        }
-
-        // Update socketId in database
         try {
-          await User.findByIdAndUpdate(
-            user._id, 
-            { $set: { socketId: socket.id } },
-            { new: true }
-          );
-          console.log(`💾 Updated socketId in DB for customer ${user._id}`);
+          await User.findByIdAndUpdate(user._id, { $set: { socketId: socket.id } }, { new: true });
         } catch (dbError) {
           console.error('❌ Database update error:', dbError);
-          // Continue anyway, socket mapping is more important
         }
 
-        // Map socket to MongoDB _id (not Firebase UID!)
         connectedCustomers.set(socket.id, user._id.toString());
 
-        console.log(`✅ Customer registered successfully:`);
-        console.log(`   - MongoDB _id: ${user._id}`);
-        console.log(`   - Phone: ${user.phone}`);
-        console.log(`   - Firebase UID: ${user.firebaseUid || 'none'}`);
-        console.log(`   - Socket ID: ${socket.id}`);
-        console.log(`   - Total connected customers: ${connectedCustomers.size}`);
-
-        // Send confirmation with complete data
         socket.emit('customer:registered', {
           success: true,
           customerId: user._id.toString(),
@@ -359,18 +272,11 @@ export const initSocket = (ioInstance) => {
 
       } catch (e) {
         console.error('❌ customer:register error:', e);
-        console.error('Stack trace:', e.stack);
-        socket.emit('customer:registered', { 
-          success: false, 
-          error: e.message,
-          stack: process.env.NODE_ENV === 'development' ? e.stack : undefined
-        });
+        socket.emit('customer:registered', { success: false, error: e.message });
       }
     });
 
-    // ========================================
-    // 🔹 CUSTOMER REQUEST TRIP
-    // ========================================
+    // CUSTOMER REQUEST TRIP
     socket.on('customer:request_trip', async (payload) => {
       try {
         if (!validateTripPayload(payload)) {
@@ -378,14 +284,12 @@ export const initSocket = (ioInstance) => {
           return;
         }
 
-        // Resolve customerId to MongoDB _id
         const user = await resolveUserByIdOrPhone(payload.customerId);
         if (!user) {
           emitTripError({ socket, message: 'Customer not found in database.' });
           return;
         }
 
-        // Replace customerId with MongoDB _id
         payload.customerId = user._id.toString();
 
         const { type } = payload;
@@ -422,19 +326,14 @@ export const initSocket = (ioInstance) => {
       }
     });
 
-    // ========================================
-    // 🔹 DRIVER ACCEPT TRIP (UPDATED WITH ATOMIC CHECK)
-    // ========================================
+    // DRIVER ACCEPT TRIP (atomic lock, OTP, notify customer + other drivers)
     socket.on('driver:accept_trip', async ({ tripId, driverId }) => {
       try {
-        console.log('');
-        console.log('='.repeat(70));
         console.log(`🚗 Driver ${driverId} attempting to accept trip ${tripId}`);
-        console.log('='.repeat(70));
 
-        // ✅ STEP 1: ATOMIC CHECK + LOCK
+        // Atomic lock on driver
         const driver = await User.findOneAndUpdate(
-          { 
+          {
             _id: driverId,
             $or: [
               { isBusy: { $ne: true } },
@@ -445,118 +344,72 @@ export const initSocket = (ioInstance) => {
               { currentTripId: null }
             ]
           },
-          { 
-            $set: { 
+          {
+            $set: {
               isBusy: true,
               currentTripId: tripId,
               lastTripAcceptedAt: new Date()
             }
           },
-          { 
+          {
             new: true,
             select: 'name phone photoUrl rating vehicleBrand vehicleNumber location isBusy currentTripId'
           }
         ).lean();
-        
+
         if (!driver) {
-          console.log('');
-          console.log('⚠️ DRIVER ALREADY BUSY OR NOT FOUND');
-          console.log('');
-          socket.emit('trip:accept_failed', {
-            message: 'You are already on another trip or cannot accept this trip',
-            reason: 'driver_busy'
-          });
+          socket.emit('trip:accept_failed', { message: 'You are already on another trip or cannot accept this trip', reason: 'driver_busy' });
           return;
         }
 
-        console.log('');
-        console.log('✅ DRIVER STATE LOCKED ATOMICALLY');
-        console.log(`   isBusy: ${driver.isBusy}`);
-        console.log(`   currentTripId: ${driver.currentTripId}`);
-        console.log('');
-
-        // ✅ STEP 2: Check trip availability
+        // Reserve trip
         const trip = await Trip.findOneAndUpdate(
           { _id: tripId, status: 'requested' },
-          { 
-            $set: { 
-              assignedDriver: driverId, 
+          {
+            $set: {
+              assignedDriver: driverId,
               status: 'driver_assigned',
               acceptedAt: new Date()
             }
           },
           { new: true }
         ).lean();
-        
+
         if (!trip) {
-          console.log('');
-          console.log('⚠️ Trip not available - rolling back driver state');
-          console.log('');
-          
-          // ✅ ROLLBACK driver state
-          await User.findByIdAndUpdate(driverId, {
-            $set: {
-              isBusy: false,
-              currentTripId: null
-            }
-          });
-          
-          socket.emit('trip:accept_failed', {
-            message: 'Trip no longer available',
-            reason: 'trip_taken'
-          });
+          // rollback driver
+          await User.findByIdAndUpdate(driverId, { $set: { isBusy: false, currentTripId: null } });
+          socket.emit('trip:accept_failed', { message: 'Trip no longer available', reason: 'trip_taken' });
           return;
         }
 
-        const customer = await User.findById(trip.customerId)
-          .select('name phone photoUrl rating')
-          .lean();
-        
+        const customer = await User.findById(trip.customerId).select('name phone photoUrl rating').lean();
         if (!customer) {
-          console.log('❌ Customer not found');
-          
-          // Rollback
-          await User.findByIdAndUpdate(driverId, {
-            $set: { isBusy: false, currentTripId: null }
-          });
-          await Trip.findByIdAndUpdate(tripId, {
-            $unset: { assignedDriver: 1 },
-            $set: { status: 'requested', acceptedAt: null }
-          });
-          
+          await User.findByIdAndUpdate(driverId, { $set: { isBusy: false, currentTripId: null } });
+          await Trip.findByIdAndUpdate(tripId, { $unset: { assignedDriver: 1 }, $set: { status: 'requested', acceptedAt: null } });
           emitTripError({ socket, tripId, message: 'Customer for this trip not found' });
           return;
         }
 
-        // ✅ STEP 3: Generate OTP
+        // Generate OTP
         const { generateOTP } = await import('../utils/otpGeneration.js');
         const rideCode = generateOTP();
-        console.log(`🎲 Generated OTP: ${rideCode}`);
+        await Trip.findByIdAndUpdate(tripId, { $set: { otp: rideCode } });
 
-        // ✅ STEP 4: Update trip with OTP
-        await Trip.findByIdAndUpdate(tripId, {
-          $set: { otp: rideCode }
-        });
-
-        console.log(`✅ Trip ${tripId} assigned to driver with OTP`);
-
-        // ✅ STEP 5: Find customer socket
+        // Find customer socket
         let customerSocketId = null;
         const customerIdStr = trip.customerId.toString();
-
         for (const [socketId, custId] of connectedCustomers.entries()) {
           if (custId === customerIdStr) {
             customerSocketId = socketId;
-            console.log(`✅ Found customer socket: ${socketId}`);
             break;
           }
         }
 
-        // ✅ STEP 6: Emit to customer
+        // Emit to customer
         if (customerSocketId) {
           const payloadToCustomer = {
             tripId: tripId.toString(),
-            rideCode: rideCode,
+            rideCode,
             trip: {
               pickup: {
                 lat: trip.pickup.coordinates[1],
@@ -577,20 +430,16 @@ export const initSocket = (ioInstance) => {
               rating: driver.rating || 4.8,
               vehicleBrand: driver.vehicleBrand || 'Vehicle',
               vehicleNumber: driver.vehicleNumber || 'N/A',
-              location: {
+              location: driver.location ? {
                 lat: driver.location.coordinates[1],
                 lng: driver.location.coordinates[0],
-              },
+              } : null,
             },
           };
-
           io.to(customerSocketId).emit('trip:accepted', payloadToCustomer);
-          console.log(`📢 trip:accepted emitted to customer with OTP: ${rideCode}`);
-        } else {
-          console.log(`⚠️ No socket found for customer ${customerIdStr}`);
         }
 
-        // ✅ STEP 7: Emit to driver
+        // Emit to driver
         const payloadToDriver = {
           tripId: tripId.toString(),
           trip: {
@@ -614,9 +463,8 @@ export const initSocket = (ioInstance) => {
           }
         };
         socket.emit('trip:confirmed_for_driver', payloadToDriver);
-        console.log(`📢 trip:confirmed_for_driver emitted to driver`);
 
-        // ✅ STEP 8: Notify other drivers this trip is taken
+        // Notify other drivers
         const otherDrivers = await User.find({
           isDriver: true,
           isOnline: true,
@@ -624,285 +472,117 @@ export const initSocket = (ioInstance) => {
           socketId: { $exists: true, $ne: null }
         }).select('socketId').lean();
 
-        console.log(`🚫 Notifying ${otherDrivers.length} other drivers`);
-
         otherDrivers.forEach(otherDriver => {
           if (otherDriver.socketId) {
             io.to(otherDriver.socketId).emit('trip:taken', {
-              tripId: tripId,
+              tripId,
               message: 'This trip has been accepted by another driver'
             });
           }
         });
 
-        console.log('='.repeat(70));
-        console.log(`✅ SUCCESS: Trip accepted by ${driver.name}`);
-        console.log('='.repeat(70));
-        console.log('');
-
       } catch (e) {
         console.error('❌ driver:accept_trip error:', e);
-        console.error('Stack:', e.stack);
-        
-        // ✅ ROLLBACK on error
         try {
-          await User.findByIdAndUpdate(driverId, {
-            $set: {
-              isBusy: false,
-              currentTripId: null
-            }
-          });
-          console.log('✅ Rolled back driver state due to error');
+          if (driverId) {
+            await User.findByIdAndUpdate(driverId, { $set: { isBusy: false, currentTripId: null } });
+          }
         } catch (rollbackError) {
           console.error('❌ Rollback failed:', rollbackError);
         }
-        
         emitTripError({ socket, tripId, message: 'Failed to accept trip.' });
       }
     });
 
-    // ========================================
-    // 🔹 DRIVER START RIDE (OTP VERIFICATION)
-    // ========================================
+    // DRIVER START RIDE (OTP verification)
     socket.on('driver:start_ride', async ({ tripId, driverId, otp, driverLat, driverLng }) => {
-      console.log('');
-      console.log('='.repeat(70));
-      console.log('🚗 DRIVER START RIDE EVENT RECEIVED');
-      console.log(`   Trip ID: ${tripId}`);
-      console.log(`   Driver ID: ${driverId}`);
-      console.log(`   OTP: ${otp}`);
-      console.log(`   Driver Location: ${driverLat}, ${driverLng}`);
-      console.log('='.repeat(70));
-      console.log('');
-
       try {
         const trip = await Trip.findById(tripId);
         if (!trip) {
-          console.log('❌ Trip not found');
           socket.emit('trip:start_error', { message: 'Trip not found' });
           return;
         }
 
-        console.log(`📋 Trip found with status: ${trip.status}`);
-        console.log(`🔐 Stored OTP: ${trip.otp}, Provided OTP: ${otp}`);
-
-        // Verify OTP
         if (trip.otp !== otp) {
-          console.log(`❌ Invalid OTP. Expected: ${trip.otp}, Got: ${otp}`);
           socket.emit('trip:start_error', { message: 'Invalid OTP. Please check the code.' });
           return;
         }
 
-        // Verify trip status
         if (trip.status !== 'driver_assigned' && trip.status !== 'driver_at_pickup') {
-          console.log(`❌ Invalid trip status: ${trip.status}`);
           socket.emit('trip:start_error', { message: `Cannot start ride. Status is: ${trip.status}` });
           return;
         }
 
-        // Update trip status to ride_started
-        await Trip.findByIdAndUpdate(tripId, {
-          $set: { 
-            status: 'ride_started',
-            rideStartTime: new Date()
-          }
-        });
-
-        console.log(`✅ Trip ${tripId} status updated to ride_started`);
+        await Trip.findByIdAndUpdate(tripId, { $set: { status: 'ride_started', rideStartTime: new Date() } });
 
         // Find customer socket
         const customerIdStr = trip.customerId.toString();
         let customerSocketId = null;
-
-        console.log(`🔍 Looking for customer socket: ${customerIdStr}`);
-        console.log(`📊 Total connected customers: ${connectedCustomers.size}`);
-
         for (const [socketId, custId] of connectedCustomers.entries()) {
-          console.log(`   Checking: ${custId} === ${customerIdStr}? ${custId === customerIdStr}`);
           if (custId === customerIdStr) {
             customerSocketId = socketId;
-            console.log(`✅ Found customer socket: ${socketId}`);
             break;
           }
         }
 
-        // Prepare the payload
         const rideStartedPayload = {
           tripId: tripId.toString(),
           message: 'Ride has started',
           timestamp: new Date().toISOString()
         };
 
-        // Emit to customer
         if (customerSocketId) {
           io.to(customerSocketId).emit('trip:ride_started', rideStartedPayload);
-          console.log('');
-          console.log('📢 ✅ EMITTED trip:ride_started TO CUSTOMER');
-          console.log(`   Socket ID: ${customerSocketId}`);
-          console.log(`   Payload:`, rideStartedPayload);
-          console.log('');
-        } else {
-          console.log('');
-          console.log('⚠️ WARNING: No socket found for customer');
-          console.log(`   Customer ID: ${customerIdStr}`);
-          console.log(`   Connected customers:`, Array.from(connectedCustomers.entries()));
-          console.log('');
         }
 
-        // Confirm to driver
-        socket.emit('trip:ride_started', {
-          tripId: tripId.toString(),
-          message: 'Ride started successfully',
-          timestamp: new Date().toISOString()
-        });
-        console.log(`📢 ✅ Confirmed trip:ride_started to driver ${driverId}`);
-
-        console.log('='.repeat(70));
-        console.log('');
+        socket.emit('trip:ride_started', { tripId: tripId.toString(), message: 'Ride started successfully', timestamp: new Date().toISOString() });
 
       } catch (e) {
         console.error('❌ driver:start_ride error:', e);
-        console.error('Stack:', e.stack);
         socket.emit('trip:start_error', { message: 'Failed to start ride: ' + e.message });
       }
     });
 
-    // ========================================
-    // 🔹 DRIVER COMPLETE RIDE (UPDATED - CLEARS DRIVER STATE)
-    // ========================================
-    // ✅ REPLACE socket.on('driver:complete_ride') in socketHandler.js
-
-socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLng }) => {
-  console.log('');
-  console.log('='.repeat(70));
-  console.log('🏁 DRIVER COMPLETE RIDE EVENT RECEIVED');
-  console.log(`   Trip ID: ${tripId}`);
-  console.log(`   Driver ID: ${driverId}`);
-  console.log(`   Driver Location: ${driverLat}, ${driverLng}`);
-  console.log('='.repeat(70));
-  console.log('');
-
-  try {
-    const trip = await Trip.findById(tripId);
-    if (!trip) {
-      console.log('❌ Trip not found');
-      socket.emit('trip:complete_error', { message: 'Trip not found' });
-      return;
-    }
-
-    console.log(`📋 Trip found with status: ${trip.status}`);
-
-    if (trip.status !== 'ride_started') {
-      console.log(`❌ Invalid trip status: ${trip.status}`);
-      socket.emit('trip:complete_error', { message: 'Ride has not started yet' });
-      return;
-    }
-
-    // Calculate fare
-    const fare = trip.estimatedFare || trip.fare || 100;
-
-    // ✅ Update trip status to completed
-   await Trip.findByIdAndUpdate(tripId, {
-    $set: { 
-      status: 'completed',
-      rideStatus: 'completed',
-      rideEndTime: new Date(),
-      finalFare: fare,
-      paymentCollected: false,  // ✅ ADD THIS LINE
-      paymentCollectedAt: null  // ✅ ADD THIS LINE
-    }
-  });
-    console.log(`✅ Trip ${tripId} status updated to completed with fare: ₹${fare}`);
-
-    // ✅ CRITICAL: Keep driver BUSY until cash collected
-    await User.findByIdAndUpdate(driverId, {
-      $set: {
-        currentTripId: tripId,  // ✅ KEEP trip ID
-        isBusy: true,            // ✅ KEEP busy
-        canReceiveNewRequests: false,
-        awaitingCashCollection: true, // ✅ NEW flag
-        lastTripCompletedAt: new Date()
-      }
-    });
-
-    console.log('');
-    console.log('⏳ DRIVER AWAITING CASH COLLECTION');
-    console.log('   currentTripId:', tripId);
-    console.log('   isBusy: true');
-    console.log('   awaitingCashCollection: true');
-    console.log('   Driver MUST click "Confirm Cash Collected" to accept new trips');
-    console.log('');
-
-    // Find customer socket
-    const customerIdStr = trip.customerId.toString();
-    let customerSocketId = null;
-
-    console.log(`🔍 Looking for customer socket: ${customerIdStr}`);
-
-    for (const [socketId, custId] of connectedCustomers.entries()) {
-      if (custId === customerIdStr) {
-        customerSocketId = socketId;
-        console.log(`✅ Found customer socket: ${socketId}`);
-        break;
-      }
-    }
-
-    // Prepare the payload
-    const rideCompletedPayload = {
-      tripId: tripId.toString(),
-      fare: fare,
-      message: 'Ride completed',
-      timestamp: new Date().toISOString()
-    };
-
-    // Emit to customer
-    if (customerSocketId) {
-      io.to(customerSocketId).emit('trip:completed', rideCompletedPayload);
-      console.log('');
-      console.log('📢 ✅ EMITTED trip:completed TO CUSTOMER');
-      console.log(`   Socket ID: ${customerSocketId}`);
-      console.log(`   Payload:`, rideCompletedPayload);
-      console.log('');
-    } else {
-      console.log('');
-      console.log('⚠️ WARNING: No socket found for customer');
-      console.log(`   Customer ID: ${customerIdStr}`);
-      console.log('');
-    }
-
-    // Confirm to driver - emphasize cash collection
-    socket.emit('trip:completed', {
-      ...rideCompletedPayload,
-      message: 'Ride completed. Please collect ₹' + fare.toFixed(2) + ' from customer.',
-      awaitingCashCollection: true // ✅ Tell Flutter to show cash screen
-    });
-    console.log(`📢 ✅ Confirmed trip:completed to driver ${driverId}`);
-    console.log(`   ⚠️ Driver must confirm cash collection to continue`);
-
-    console.log('='.repeat(70));
-    console.log('');
-
-  } catch (e) {
-    console.error('❌ driver:complete_ride error:', e);
-    console.error('Stack:', e.stack);
-    socket.emit('trip:complete_error', { message: 'Failed to complete ride: ' + e.message });
-  }
-});
-    // ========================================
-    // 🔹 DRIVER GOING TO PICKUP
-    // ========================================
-    socket.on('driver:going_to_pickup', async ({ tripId, driverId }) => {
-      console.log(`🚗 Driver ${driverId} going to pickup for trip ${tripId}`);
-
+    // DRIVER COMPLETE RIDE (keeps driver busy until cash collected)
+    socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLng }) => {
       try {
+        const trip = await Trip.findById(tripId);
+        if (!trip) {
+          socket.emit('trip:complete_error', { message: 'Trip not found' });
+          return;
+        }
+
+        if (trip.status !== 'ride_started') {
+          socket.emit('trip:complete_error', { message: 'Ride has not started yet' });
+          return;
+        }
+
+        const fare = trip.estimatedFare || trip.fare || 100;
+
         await Trip.findByIdAndUpdate(tripId, {
-          $set: { status: 'driver_going_to_pickup' }
+          $set: {
+            status: 'completed',
+            rideStatus: 'completed',
+            rideEndTime: new Date(),
+            finalFare: fare,
+            paymentCollected: false,
+            paymentCollectedAt: null
+          }
         });
 
-        const trip = await Trip.findById(tripId).lean();
+        await User.findByIdAndUpdate(driverId, {
+          $set: {
+            currentTripId: tripId,
+            isBusy: true,
+            canReceiveNewRequests: false,
+            awaitingCashCollection: true,
+            lastTripCompletedAt: new Date()
+          }
+        });
+
+        // Notify customer
         const customerIdStr = trip.customerId.toString();
         let customerSocketId = null;
-
         for (const [socketId, custId] of connectedCustomers.entries()) {
           if (custId === customerIdStr) {
             customerSocketId = socketId;
@@ -910,88 +590,93 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
           }
         }
 
+        const rideCompletedPayload = {
+          tripId: tripId.toString(),
+          fare,
+          message: 'Ride completed',
+          timestamp: new Date().toISOString()
+        };
+
         if (customerSocketId) {
-          io.to(customerSocketId).emit('trip:driver_going_to_pickup', {
-            tripId: tripId.toString(),
-            message: 'Driver is on the way to pickup'
-          });
-          console.log(`📢 Emitted driver_going_to_pickup to customer`);
+          io.to(customerSocketId).emit('trip:completed', rideCompletedPayload);
         }
 
+        socket.emit('trip:completed', {
+          ...rideCompletedPayload,
+          message: 'Ride completed. Please collect ₹' + fare.toFixed(2) + ' from customer.',
+          awaitingCashCollection: true
+        });
+
+      } catch (e) {
+        console.error('❌ driver:complete_ride error:', e);
+        socket.emit('trip:complete_error', { message: 'Failed to complete ride: ' + e.message });
+      }
+    });
+
+    // DRIVER GOING TO PICKUP
+    socket.on('driver:going_to_pickup', async ({ tripId, driverId }) => {
+      try {
+        await Trip.findByIdAndUpdate(tripId, { $set: { status: 'driver_going_to_pickup' } });
+        const trip = await Trip.findById(tripId).lean();
+        const customerIdStr = trip.customerId.toString();
+        let customerSocketId = null;
+        for (const [socketId, custId] of connectedCustomers.entries()) {
+          if (custId === customerIdStr) {
+            customerSocketId = socketId;
+            break;
+          }
+        }
+        if (customerSocketId) {
+          io.to(customerSocketId).emit('trip:driver_going_to_pickup', { tripId: tripId.toString(), message: 'Driver is on the way to pickup' });
+        }
         socket.emit('trip:status_updated', { success: true });
       } catch (e) {
         console.error('❌ driver:going_to_pickup error:', e);
       }
     });
 
-    // ========================================
-    // 🔹 DRIVER ARRIVED AT PICKUP
-    // ========================================
+    // DRIVER ARRIVED AT PICKUP
     socket.on('trip:arrived_at_pickup', async ({ tripId, driverId }) => {
       try {
-        console.log(`📍 Driver ${driverId} arrived at pickup for trip ${tripId}`);
-
-        await Trip.findByIdAndUpdate(tripId, {
-          $set: { status: 'driver_at_pickup' }
-        });
-
+        await Trip.findByIdAndUpdate(tripId, { $set: { status: 'driver_at_pickup' } });
         const trip = await Trip.findById(tripId).lean();
         const customerIdStr = trip.customerId.toString();
         let customerSocketId = null;
-
         for (const [socketId, custId] of connectedCustomers.entries()) {
           if (custId === customerIdStr) {
             customerSocketId = socketId;
             break;
           }
         }
-
         if (customerSocketId) {
-          io.to(customerSocketId).emit('trip:driver_arrived', {
-            tripId: tripId.toString(),
-            message: 'Driver has arrived at pickup location'
-          });
+          io.to(customerSocketId).emit('trip:driver_arrived', { tripId: tripId.toString(), message: 'Driver has arrived at pickup location' });
         }
-
         socket.emit('trip:status_updated', { success: true });
       } catch (e) {
         console.error('❌ trip:arrived_at_pickup error:', e);
       }
     });
 
-    // ========================================
-    // 🔹 DRIVER LOCATION UPDATE (LIVE TRACKING)
-    // ========================================
+    // DRIVER LOCATION UPDATE (LIVE TRACKING)
     socket.on('driver:location', async ({ tripId, latitude, longitude }) => {
       try {
         if (!tripId || !latitude || !longitude) return;
-
         const trip = await Trip.findById(tripId).lean();
         if (!trip) return;
 
-        // Calculate distance to drop location
         const dropLat = trip.drop.coordinates[1];
         const dropLng = trip.drop.coordinates[0];
-        
         const distance = calculateDistance(latitude, longitude, dropLat, dropLng);
         const distanceInMeters = distance * 1000;
-        
-        // Update driver status based on proximity
+
         if (distanceInMeters <= 500 && trip.status === 'ride_started') {
-          await User.findByIdAndUpdate(trip.assignedDriver, {
-            $set: { canReceiveNewRequests: true }
-          });
-          console.log(`✅ Driver ${trip.assignedDriver} within 500m - can receive new requests (${distanceInMeters.toFixed(0)}m away)`);
+          await User.findByIdAndUpdate(trip.assignedDriver, { $set: { canReceiveNewRequests: true } });
         } else {
-          await User.findByIdAndUpdate(trip.assignedDriver, {
-            $set: { canReceiveNewRequests: false }
-          });
+          await User.findByIdAndUpdate(trip.assignedDriver, { $set: { canReceiveNewRequests: false } });
         }
-        
-        // Forward location to customer
+
         const customerIdStr = trip.customerId.toString();
         let customerSocketId = null;
-
         for (const [socketId, custId] of connectedCustomers.entries()) {
           if (custId === customerIdStr) {
             customerSocketId = socketId;
@@ -1008,361 +693,254 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
             timestamp: new Date().toISOString()
           });
         }
-        
+
       } catch (e) {
         console.error('❌ driver:location error:', e);
       }
     });
 
-    // ========================================
-    // 🔹 DRIVER HEARTBEAT (CRASH DETECTION)
-    // ========================================
+    // DRIVER HEARTBEAT
     socket.on('driver:heartbeat', async ({ tripId, driverId, timestamp }) => {
       try {
         if (!tripId || !driverId) return;
-
-        await Trip.findByIdAndUpdate(tripId, {
-          $set: { lastDriverHeartbeat: new Date(timestamp) }
-        });
-
-        console.log(`💓 Heartbeat received from driver ${driverId} for trip ${tripId}`);
+        await Trip.findByIdAndUpdate(tripId, { $set: { lastDriverHeartbeat: new Date(timestamp) } });
       } catch (e) {
         console.error('❌ driver:heartbeat error:', e);
       }
     });
 
-    // ========================================
-    // 🔹 CHAT MESSAGE HANDLER
-    // ========================================
-    socket.on('chat:send_message', async ({ tripId, fromId, toId, message }) => {
+    // CHAT: ROOM JOIN
+    socket.on('chat:join', (data) => {
       try {
-        console.log(`💬 Chat message from ${fromId} to ${toId} for trip ${tripId}`);
-        
-        let recipientSocketId = null;
-
-        // Find recipient in either connected map
-        for (const [socketId, userId] of connectedCustomers.entries()) {
-          if (userId === toId) {
-            recipientSocketId = socketId;
-            break;
-          }
-        }
-        
-        if (!recipientSocketId) {
-          for (const [socketId, userId] of connectedDrivers.entries()) {
-            if (userId === toId) {
-              recipientSocketId = socketId;
-              break;
-            }
-          }
-        }
-
-        if (recipientSocketId) {
-          const payload = { tripId, fromId, message, timestamp: new Date().toISOString() };
-          io.to(recipientSocketId).emit('chat:receive_message', payload);
-          console.log(`   ✓ Delivered message to socket ${recipientSocketId}`);
-        } else {
-          console.warn(`   ✗ Could not find active socket for user ${toId}. Message not sent.`);
-        }
-      } catch (e) {
-        console.error('❌ chat:send_message error:', e);
+        const { tripId, userId } = data;
+        if (!tripId) return;
+        const roomName = `chat_${tripId}`;
+        socket.join(roomName);
+        socket.to(roomName).emit('chat:user_joined', { userId, timestamp: new Date().toISOString() });
+      } catch (error) {
+        console.error('❌ Error in chat:join:', error);
       }
     });
 
-    // ========================================
-    // 🔹 NEW: MANUAL GO OFFLINE (EXPLICIT)
-    // ========================================
+    // CHAT: LEAVE ROOM
+    socket.on('chat:leave', (data) => {
+      try {
+        const { tripId, userId } = data;
+        if (!tripId) return;
+        const roomName = `chat_${tripId}`;
+        socket.leave(roomName);
+        socket.to(roomName).emit('chat:user_left', { userId, timestamp: new Date().toISOString() });
+      } catch (error) {
+        console.error('❌ Error in chat:leave:', error);
+      }
+    });
+
+    // CHAT: SEND MESSAGE (single, saved + room + direct fallback)
+    socket.on('chat:send_message', async (data) => {
+      try {
+        const { tripId, fromId, toId, message, timestamp } = data;
+        if (!tripId || !fromId || !toId || !message) {
+          socket.emit('chat:error', { error: 'Missing required fields' });
+          return;
+        }
+
+        // Save to DB (best-effort)
+        try {
+          const chatMessage = new ChatMessage({
+            tripId,
+            senderId: fromId,
+            receiverId: toId,
+            message,
+            timestamp: timestamp ? new Date(timestamp) : new Date()
+          });
+          await chatMessage.save();
+        } catch (dbError) {
+          console.warn('⚠️ Failed to save chat message:', dbError);
+        }
+
+        const messageData = {
+          tripId,
+          fromId,
+          toId,
+          senderId: fromId,
+          receiverId: toId,
+          message,
+          timestamp: timestamp || new Date().toISOString()
+        };
+
+        const roomName = `chat_${tripId}`;
+        socket.to(roomName).emit('chat:receive_message', messageData);
+        socket.to(roomName).emit('chat:new_message', messageData);
+        socket.emit('chat:message_sent', { success: true, timestamp: messageData.timestamp });
+
+        // Direct fallback delivery
+        let recipientSocketId = null;
+        for (const [socketId, userId] of connectedCustomers.entries()) {
+          if (userId === toId) { recipientSocketId = socketId; break; }
+        }
+        if (!recipientSocketId) {
+          for (const [socketId, userId] of connectedDrivers.entries()) {
+            if (userId === toId) { recipientSocketId = socketId; break; }
+          }
+        }
+        if (recipientSocketId) {
+          io.to(recipientSocketId).emit('chat:receive_message', messageData);
+          io.to(recipientSocketId).emit('chat:new_message', messageData);
+          io.to(recipientSocketId).emit('chat:notification', { tripId, fromId, message: message.substring(0, 50), timestamp: messageData.timestamp });
+        }
+
+      } catch (error) {
+        console.error('❌ Error in chat:send_message:', error);
+        socket.emit('chat:error', { error: 'Failed to send message', details: error.message });
+      }
+    });
+
+    // CHAT: TYPING
+    socket.on('chat:typing', (data) => {
+      try {
+        const { tripId, userId, isTyping } = data;
+        if (!tripId) return;
+        const roomName = `chat_${tripId}`;
+        socket.to(roomName).emit('chat:typing_status', { userId, isTyping, timestamp: new Date().toISOString() });
+      } catch (error) {
+        console.error('❌ Error in chat:typing:', error);
+      }
+    });
+
+    // CHAT: MARK READ
+    socket.on('chat:mark_read', async (data) => {
+      try {
+        const { tripId, userId } = data;
+        if (!tripId || !userId) return;
+        const result = await ChatMessage.updateMany({ tripId, receiverId: userId, read: false }, { $set: { read: true } });
+        const roomName = `chat_${tripId}`;
+        socket.to(roomName).emit('chat:messages_read', { userId, tripId, timestamp: new Date().toISOString() });
+      } catch (error) {
+        console.error('❌ Error in chat:mark_read:', error);
+      }
+    });
+
+    // CHAT: GET UNREAD
+    socket.on('chat:get_unread', async (data) => {
+      try {
+        const { userId } = data;
+        if (!userId) return;
+        const unreadCount = await ChatMessage.countDocuments({ receiverId: userId, read: false });
+        socket.emit('chat:unread_count', { userId, count: unreadCount, timestamp: new Date().toISOString() });
+      } catch (error) {
+        console.error('❌ Error in chat:get_unread:', error);
+      }
+    });
+
+    // DRIVER MANUAL GO OFFLINE
     socket.on('driver:go_offline', async ({ driverId }) => {
       try {
-        console.log('');
-        console.log('='.repeat(70));
-        console.log(`🔴 DRIVER MANUAL GO OFFLINE REQUEST`);
-        console.log(`   Driver ID: ${driverId}`);
-        console.log('='.repeat(70));
-        
-        const driver = await User.findById(driverId)
-          .select('currentTripId isBusy name')
-          .lean();
-        
-        if (!driver) {
-          console.log('❌ Driver not found');
-          return;
-        }
-        
-        // ✅ BLOCK if there's an active trip
+        const driver = await User.findById(driverId).select('currentTripId isBusy name').lean();
+        if (!driver) return;
         if (driver.currentTripId || driver.isBusy) {
-          console.log('');
-          console.log('⚠️ CANNOT GO OFFLINE - ACTIVE TRIP IN PROGRESS');
-          console.log(`   Trip ID: ${driver.currentTripId}`);
-          console.log(`   Driver: ${driver.name}`);
-          console.log('');
-          
-          socket.emit('driver:offline_blocked', {
-            success: false,
-            message: 'Cannot go offline during active trip',
-            currentTripId: driver.currentTripId
-          });
+          socket.emit('driver:offline_blocked', { success: false, message: 'Cannot go offline during active trip', currentTripId: driver.currentTripId });
           return;
         }
-        
-        // ✅ Safe to go offline
-        await User.findByIdAndUpdate(driverId, {
-          $set: {
-            isOnline: false,
-            socketId: null,
-            canReceiveNewRequests: false
-          }
-        });
-        
+        await User.findByIdAndUpdate(driverId, { $set: { isOnline: false, socketId: null, canReceiveNewRequests: false } });
         connectedDrivers.delete(socket.id);
         socket.disconnect(true);
-        
-        console.log(`✅ Driver ${driver.name} (${driverId}) went offline successfully`);
-        console.log('='.repeat(70));
-        console.log('');
-        
       } catch (e) {
         console.error('❌ driver:go_offline error:', e);
       }
     });
 
-    // ========================================
-    // 🔹 UPDATED: DISCONNECT HANDLER (PASSIVE)
-    // ========================================
-    // ============================================================
-// 🔧 FIXED DISCONNECT HANDLER - Add to socketHandler.js
-// ============================================================
+    // DISCONNECT HANDLER
+    socket.on('disconnect', async () => {
+      try {
+        const driverId = connectedDrivers.get(socket.id);
+        const customerId = connectedCustomers.get(socket.id);
 
-socket.on('disconnect', async () => {
-  try {
-    const driverId = connectedDrivers.get(socket.id);
-    const customerId = connectedCustomers.get(socket.id);
+        if (driverId) {
+          const driver = await User.findById(driverId).select('currentTripId isBusy isOnline name phone awaitingCashCollection').lean();
+          if (!driver) {
+            connectedDrivers.delete(socket.id);
+            return;
+          }
 
-    if (driverId) {
-      const driver = await User.findById(driverId)
-        .select('currentTripId isBusy isOnline name phone awaitingCashCollection')
-        .lean();
-      
-      if (!driver) {
-        connectedDrivers.delete(socket.id);
-        return;
-      }
-      
-      console.log('');
-      console.log('='.repeat(70));
-      console.log(`🔌 DRIVER SOCKET DISCONNECT DETECTED`);
-      console.log(`   Driver: ${driver.name} (${driverId})`);
-      console.log(`   Phone: ${driver.phone}`);
-      console.log(`   Has Active Trip: ${driver.currentTripId ? 'YES' : 'NO'}`);
-      console.log(`   Trip ID: ${driver.currentTripId || 'NONE'}`);
-      console.log(`   isBusy: ${driver.isBusy}`);
-      console.log(`   isOnline: ${driver.isOnline}`);
-      console.log(`   awaitingCashCollection: ${driver.awaitingCashCollection}`);
-      console.log('='.repeat(70));
-      
-      // ✅ CRITICAL FIX: Check if trip is truly active
-      let hasRealActiveTrip = false;
-      
-      if (driver.currentTripId) {
-        // Verify trip is ACTUALLY active
-        const trip = await Trip.findById(driver.currentTripId)
-          .select('status paymentCollected')
-          .lean();
-        
-        if (trip) {
-          const activeStatuses = ['driver_assigned', 'driver_going_to_pickup', 'driver_at_pickup', 'ride_started'];
-          
-          // ✅ FIXED: Trip is ONLY active if:
-          // 1. Status is in active list OR
-          // 2. Completed but payment NOT collected (explicitly check !== true)
-          hasRealActiveTrip = activeStatuses.includes(trip.status) || 
-                            (trip.status === 'completed' && trip.paymentCollected !== true);
-          
-          console.log(`📋 Trip ${driver.currentTripId} verification:`);
-          console.log(`   Status: ${trip.status}`);
-          console.log(`   Payment Collected: ${trip.paymentCollected}`);
-          console.log(`   Is TRULY Active: ${hasRealActiveTrip}`);
-          
-          // ✅ Extra check: If payment is collected, this is stale data
-          if (trip.paymentCollected === true) {
-            console.log('');
-            console.log('⚠️ STALE TRIP DATA DETECTED - Payment already collected!');
-            console.log('   This trip should have been cleared. Cleaning up now...');
-            console.log('');
-            hasRealActiveTrip = false; // Force cleanup
-          }
-        } else {
-          console.log(`⚠️ Trip ${driver.currentTripId} not found in database`);
-          hasRealActiveTrip = false;
-        }
-      }
-      
-      if (hasRealActiveTrip) {
-        console.log('');
-        console.log('⚠️ DRIVER HAS REAL ACTIVE TRIP - KEEPING ONLINE STATUS');
-        console.log('   Actions:');
-        console.log('   1. Clear socketId (allow reconnection)');
-        console.log('   2. Keep isOnline = true');
-        console.log('   3. Keep isBusy = true');
-        console.log('   4. Keep currentTripId intact');
-        console.log('');
-        
-        // ✅ Only clear socketId, keep everything else
-        await User.findByIdAndUpdate(driverId, {
-          $set: {
-            socketId: null,
-            lastDisconnectedAt: new Date()
-          }
-          // ⚠️ DO NOT CHANGE: isOnline, isBusy, currentTripId, awaitingCashCollection
-        });
-        
-        console.log('✅ Driver can reconnect and resume trip');
-        console.log('='.repeat(70));
-        console.log('');
-        
-      } else {
-        console.log('');
-        console.log('✅ NO REAL ACTIVE TRIP - CLEANING UP DRIVER STATE');
-        console.log('');
-        
-        // ✅ CRITICAL FIX: Completely free the driver
-        const updateResult = await User.findByIdAndUpdate(driverId, {
-          $set: {
-            isOnline: false,
-            isBusy: false,              // ✅ RESET
-            socketId: null,
-            currentTripId: null,        // ✅ CLEAR
-            canReceiveNewRequests: false,
-            awaitingCashCollection: false, // ✅ CLEAR
-            lastDisconnectedAt: new Date()
-          }
-        }, { new: true });
-        
-        if (updateResult) {
-          console.log(`🔴 Driver ${driver.name} FULLY FREED on disconnect`);
-          console.log('   - isOnline: false');
-          console.log('   - isBusy: false');
-          console.log('   - currentTripId: null');
-          console.log('   - awaitingCashCollection: false');
-          
-          // ✅ VERIFY the update worked
-          const verify = await User.findById(driverId)
-            .select('isBusy currentTripId awaitingCashCollection')
-            .lean();
-          
-          console.log('');
-          console.log('🔍 VERIFICATION:');
-          console.log(`   isBusy: ${verify.isBusy}`);
-          console.log(`   currentTripId: ${verify.currentTripId}`);
-          console.log(`   awaitingCashCollection: ${verify.awaitingCashCollection}`);
-          
-          if (verify.isBusy || verify.currentTripId || verify.awaitingCashCollection) {
-            console.log('');
-            console.log('❌ CRITICAL: Verification FAILED - state not cleared!');
-            console.log('   Attempting force clear...');
-            console.log('');
-            
-            // Force clear again
-            await User.updateOne(
-              { _id: driverId },
-              {
-                $set: {
-                  isBusy: false,
-                  currentTripId: null,
-                  awaitingCashCollection: false,
-                  isOnline: false
-                }
+          let hasRealActiveTrip = false;
+
+          if (driver.currentTripId) {
+            const trip = await Trip.findById(driver.currentTripId).select('status paymentCollected').lean();
+            if (trip) {
+              const activeStatuses = ['driver_assigned', 'driver_going_to_pickup', 'driver_at_pickup', 'ride_started'];
+              hasRealActiveTrip = activeStatuses.includes(trip.status) || (trip.status === 'completed' && trip.paymentCollected !== true);
+              if (trip.paymentCollected === true) {
+                hasRealActiveTrip = false;
               }
-            );
-            
-            console.log('✅ Force clear completed');
+            } else {
+              hasRealActiveTrip = false;
+            }
+          }
+
+          if (hasRealActiveTrip) {
+            await User.findByIdAndUpdate(driverId, { $set: { socketId: null, lastDisconnectedAt: new Date() } });
           } else {
-            console.log('✅ Verification passed - state properly cleared');
+            await User.findByIdAndUpdate(driverId, {
+              $set: {
+                isOnline: false,
+                isBusy: false,
+                socketId: null,
+                currentTripId: null,
+                canReceiveNewRequests: false,
+                awaitingCashCollection: false,
+                lastDisconnectedAt: new Date()
+              }
+            }, { new: true });
+
+            // verification step (best-effort)
+            const verify = await User.findById(driverId).select('isBusy currentTripId awaitingCashCollection').lean();
+            if (verify && (verify.isBusy || verify.currentTripId || verify.awaitingCashCollection)) {
+              await User.updateOne({ _id: driverId }, { $set: { isBusy: false, currentTripId: null, awaitingCashCollection: false, isOnline: false } });
+            }
           }
+
+          connectedDrivers.delete(socket.id);
         }
-        
-        console.log('='.repeat(70));
-        console.log('');
+
+        if (customerId) {
+          connectedCustomers.delete(socket.id);
+          await User.findByIdAndUpdate(customerId, { $set: { socketId: null, lastDisconnectedAt: new Date() } });
+        }
+
+      } catch (e) {
+        console.error('❌ disconnect cleanup error:', e);
       }
-      
-      connectedDrivers.delete(socket.id);
-    }
+    });
 
-    if (customerId) {
-      connectedCustomers.delete(socket.id);
-      await User.findByIdAndUpdate(customerId, { 
-        $set: { 
-          socketId: null,
-          lastDisconnectedAt: new Date()
-        }
-      });
-      console.log(`👤 Customer disconnected: ${customerId}`);
-    }
-    
-  } catch (e) {
-    console.error('❌ disconnect cleanup error:', e);
-    console.error('Stack:', e.stack);
-  }
-});
-
-  // ========================================
-  // 🔹 AUTO-CLEANUP EXPIRED TRIP REQUESTS
-  // ========================================
-  setInterval(async () => {
-    try {
-      const now = new Date();
-      const expiredTrips = await Trip.find({
-        status: 'requested',
-        expiresAt: { $lt: now }
-      });
-      
-      if (expiredTrips.length === 0) return;
-      
-      console.log(`⏰ Found ${expiredTrips.length} expired trip(s)`);
-      
-      for (const trip of expiredTrips) {
-        await Trip.findByIdAndUpdate(trip._id, {
-          $set: { status: 'timeout' }
-        });
-        
-        // Notify customer
-        const customer = await User.findById(trip.customerId).select('socketId').lean();
-        if (customer?.socketId) {
-          io.to(customer.socketId).emit('trip:timeout', {
-            tripId: trip._id.toString(),
-            message: 'No drivers available right now. Please try again.',
-            reason: 'timeout'
+    // AUTO-CLEANUP EXPIRED TRIP REQUESTS
+    setInterval(async () => {
+      try {
+        const now = new Date();
+        const expiredTrips = await Trip.find({ status: 'requested', expiresAt: { $lt: now } });
+        if (!expiredTrips.length) return;
+        for (const trip of expiredTrips) {
+          await Trip.findByIdAndUpdate(trip._id, { $set: { status: 'timeout' } });
+          const customer = await User.findById(trip.customerId).select('socketId').lean();
+          if (customer?.socketId) {
+            io.to(customer.socketId).emit('trip:timeout', { tripId: trip._id.toString(), message: 'No drivers available right now. Please try again.', reason: 'timeout' });
+          }
+          const onlineDrivers = await User.find({ isDriver: true, isOnline: true, socketId: { $exists: true, $ne: null } }).select('socketId').lean();
+          onlineDrivers.forEach(driver => {
+            if (driver.socketId) {
+              io.to(driver.socketId).emit('trip:expired', { tripId: trip._id.toString(), message: 'This request has expired' });
+            }
           });
-          console.log(`📢 Notified customer ${trip.customerId} - trip ${trip._id} expired`);
         }
-        
-        // Notify all online drivers
-        const onlineDrivers = await User.find({
-          isDriver: true,
-          isOnline: true,
-          socketId: { $exists: true, $ne: null }
-        }).select('socketId').lean();
-        
-        onlineDrivers.forEach(driver => {
-          if (driver.socketId) {
-            io.to(driver.socketId).emit('trip:expired', {
-              tripId: trip._id.toString(),
-              message: 'This request has expired'
-            });
-          }
-        });
-        
-        console.log(`⏰ Trip ${trip._id} marked as timeout`);
+      } catch (e) {
+        console.error('❌ Cleanup job error:', e);
       }
-    } catch (e) {
-      console.error('❌ Cleanup job error:', e);
-    }
-  }, 5000); // Run every 5 seconds
+    }, 5000); // every 5s
 
-  console.log('⏰ Trip cleanup job started (checks every 5 seconds)');
-  startNotificationRetryJob();
-  startStaleTripCleanup();
-  console.log('🚀 Socket.IO initialized');
-});
-}
+    console.log('⏰ Trip cleanup job started (checks every 5 seconds)');
+    startNotificationRetryJob();
+    startStaleTripCleanup();
+    console.log('🚀 Socket.IO initialized');
+  });
+};
+
 export { io, connectedDrivers, connectedCustomers };

@@ -19,18 +19,19 @@ import rideHistoryRoutes from './routes/rideHistoryRoutes.js';
 import locationRoutes from './routes/locationRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import tripRoutes from './routes/tripRoutes.js';
-import healthRoutes from './routes/healthRoutes.js';  // ✅ NEW
+import healthRoutes from './routes/healthRoutes.js';
+import walletRoutes from './routes/walletRoutes.js';
+import chatRoutes from './routes/chatRoutes.js'; // 📨 NEW: Import chat routes
 
 import standbyReassignCron from './cron/standbyReassignCron.js';
 import { initSocket } from './socket/socketHandler.js';
-import walletRoutes from './routes/walletRoutes.js'; // 👈 1. IMPORT THE NEW FILE
 
 dotenv.config();
 await connectDB();
 
 const app = express();
 const httpServer = createServer(app);
-const io = new Server(httpServer, {   // ✅ use httpServer, not server
+const io = new Server(httpServer, {
   cors: { origin: "*" },
 });
 
@@ -45,7 +46,7 @@ app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (_req, res) => {
-  res.send('🌍 Go India backend live 🚀');
+  res.send('🌐 Go India backend live 🚀');
 });
 initSocket(io);
 
@@ -60,11 +61,9 @@ app.use('/api', rideHistoryRoutes);
 app.use('/api/location', locationRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/trip', tripRoutes);
-app.use('/api', healthRoutes);  // ✅ NEW
-
-app.use('/api/wallet', walletRoutes); // 👈 2. ADD THIS LINE
-
-// ✅ Socket.IO Init
+app.use('/api', healthRoutes);
+app.use('/api/wallet', walletRoutes);
+app.use('/api/chat', chatRoutes); // 📨 NEW: Add chat routes
 
 // ✅ Start Cron (every 2 minutes)
 setInterval(() => {
@@ -85,6 +84,8 @@ app.use((err, req, res, _next) => {
     message: err.message || '🚨 Internal Server Error',
   });
 });
+
+// Cleanup stuck drivers every 5 minutes
 cron.schedule('*/5 * * * *', async () => {
   try {
     console.log('🔍 Running driver availability cleanup...');
@@ -129,11 +130,21 @@ cron.schedule('*/5 * * * *', async () => {
     console.error('❌ Cleanup job error:', error);
   }
 });
+
 cron.schedule('*/5 * * * *', cleanupStuckDrivers);
 
 // ✅ Start Server
 const PORT = process.env.PORT || 5002;
-httpServer.listen(PORT, () =>
-  console.log(`🚀 Go India server running on port ${PORT}`)
-);
+httpServer.listen(PORT, () => {
+  console.log('');
+  console.log('='.repeat(70));
+  console.log(`🚀 Go India server running on port ${PORT}`);
+  console.log('');
+  console.log('📨 Chat system enabled');
+  console.log('   - WebSocket: Active');
+  console.log('   - REST API: /api/chat/*');
+  console.log('='.repeat(70));
+  console.log('');
+});
+
 export { io, httpServer };

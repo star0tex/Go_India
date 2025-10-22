@@ -1,8 +1,8 @@
 // src/utils/requiredDocs.js
 
 const requiredDocs = {
-  auto: ["license", "rc", "pan", "aadhaar", "fitnessCertificate"],
-  car: ["license", "rc", "pan", "aadhaar", "fitnessCertificate", "permit", "insurance"],
+  auto: ["license", "rc", "pan", "aadhaar", "fitnesscertificate"],
+  car: ["license", "rc", "pan", "aadhaar", "fitnesscertificate", "permit", "insurance"],
   bike: ["license", "rc", "pan", "aadhaar"], // optional default
 };
 
