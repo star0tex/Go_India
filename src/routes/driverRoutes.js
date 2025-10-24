@@ -1,9 +1,17 @@
 import express from "express";
 import { uploadDriverProfilePhoto } from "../controllers/driverProfileController.js";
-import { uploadDriverDocument, getDriverDocuments, getDriverById, getDriverProfile } from "../controllers/documentController.js";
+import { 
+  uploadDriverDocument, 
+  getDriverDocuments, 
+  getDriverById, 
+  getDriverProfile 
+} from "../controllers/documentController.js";
 import { protect } from "../middlewares/authMiddleware.js";
 import { uploadDocument, uploadProfilePhoto } from "../middlewares/multer.js";
-import { updateDriverVehicleType } from "../controllers/driverController.js";
+import { 
+  updateDriverVehicleType,
+  updateDriverProfile // ✅ NEW IMPORT
+} from "../controllers/driverController.js";
 import User from "../models/User.js";
 
 const router = express.Router();
@@ -110,6 +118,14 @@ router.get("/profile", protect, getDriverProfile);
  * @access  Protected
  */
 router.post("/setVehicleType", protect, updateDriverVehicleType);
+
+/**
+ * ✅ NEW ROUTE
+ * @route   POST /api/driver/updateProfile
+ * @desc    Update driver profile (name, vehicle number, vehicle type)
+ * @access  Protected
+ */
+router.post("/updateProfile", protect, updateDriverProfile);
 
 /**
  * @route   GET /api/driver/documents/:driverId
