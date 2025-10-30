@@ -15,13 +15,14 @@ import driverRoutes from './routes/driverRoutes.js';
 import fareRoutes from './routes/fareRoutes.js';
 import parcelRoutes from './routes/parcelRoutes.js';
 import rateRoutes from './routes/rateRoutes.js';
-import rideHistoryRoutes from './routes/rideHistoryRoutes.js';
 import locationRoutes from './routes/locationRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import tripRoutes from './routes/tripRoutes.js';
 import healthRoutes from './routes/healthRoutes.js';
 import walletRoutes from './routes/walletRoutes.js';
 import chatRoutes from './routes/chatRoutes.js'; // 📨 NEW: Import chat routes
+import rideHistoryRoutes from './routes/rideHistory.js';
+import driverRideHistoryRoutes from './routes/driverRideHistory.js';
 
 import standbyReassignCron from './cron/standbyReassignCron.js';
 import { initSocket } from './socket/socketHandler.js';
@@ -64,6 +65,8 @@ app.use('/api/trip', tripRoutes);
 app.use('/api', healthRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/chat', chatRoutes); // 📨 NEW: Add chat routes
+app.use(rideHistoryRoutes);
+app.use('/api/driver', driverRideHistoryRoutes);
 
 // ✅ Start Cron (every 2 minutes)
 setInterval(() => {
