@@ -21,15 +21,20 @@ export function calcFare({
 
   const category = rate.category;
 
-  /* ════════ PARCEL‑DELIVERY ════════ */
+  /* ════════ PARCEL-DELIVERY ════════ */
   if (category === 'parcel') {
     const baseFare     = rate.baseFare     ?? 25;
     const perKm        = rate.perKm        ?? 7;
-    const platformFee  = rate.platformFee  ?? 15;
+    const platformFee  = (() => {
+      if (distanceKm <= 3) return 5;
+      if (distanceKm <= 5) return 7;
+      if (distanceKm <= 10) return 10;
+      return 15;
+    })();
     const maxWeightKg  = rate.maxWeightKg  ?? 10;
 
     if (weight > maxWeightKg) {
-      throw new Error(`Parcel weight exceeds ${maxWeightKg} kg bike limit`);
+      throw new Error(`Parcel weight exceeds ${maxWeightKg} kg bike limit`);
     }
 
     const weightCharges = (() => {
@@ -39,8 +44,8 @@ export function calcFare({
     })();
 
     const deliveryCharge = perKm * distanceKm;
-
     let total = baseFare + deliveryCharge + weightCharges + platformFee;
+
     total = Math.ceil(total / 5) * 5;
 
     return {
@@ -56,35 +61,88 @@ export function calcFare({
   }
 
   /* ═════════════════════════════════════════════════════
-     SHORT‑TRIP  (bike / auto / prime / car / xl)
+     SHORT-TRIP  (bike / auto / car / premium / xl)
      ════════════════════════════════════════════════════ */
   else if (category === 'short') {
-    const chargeableDistance = Math.max(0, distanceKm - (rate.baseFareDistanceKm ?? 0));
-    const farePieces = {
-      baseFare: rate.baseFare,
-      distanceFare: rate.perKm * chargeableDistance,
-      timeFare: rate.perMin * durationMin,
-      platformFee: ((rate.platformFeePercent ?? 0) / 100),
+    const vehicle = rate.vehicleType?.toLowerCase?.() || 'bike';
+
+    // ---- Base & distance tiers ----
+    const tiers = {
+      bike: {
+        baseFare: 20,
+        baseDistance: 1,
+        timeRate: 0.7,
+        perKm: (d) => (d <= 5 ? 6 : d <= 10 ? 7 : d <= 15 ? 8 : d <= 20 ? 9 : 10),
+        minFare: 45
+      },
+      auto: {
+        baseFare: 40,
+        baseDistance: 2,
+        timeRate: (d) => (d <= 10 ? 1.5 : 2),
+        perKm: () => 14,
+        minFare: 80
+      },
+      car: {
+        baseFare: 70,
+        baseDistance: 2,
+        timeRate: (d) => (d <= 10 ? 2.5 : 3),
+        perKm: () => 15,
+        minFare: 100
+      },
+      premium: {
+        baseFare: 100,
+        baseDistance: 2,
+        timeRate: (d) => (d <= 10 ? 4 : 5),
+        perKm: () => 19,
+        minFare: 130
+      },
+      xl: {
+        baseFare: 120,
+        baseDistance: 2,
+        timeRate: (d) => (d <= 10 ? 6 : 7),
+        perKm: () => 20,
+        minFare: 160
+      }
     };
 
-    let subtotal = farePieces.baseFare + farePieces.distanceFare + farePieces.timeFare;
-    subtotal += subtotal * farePieces.platformFee;
+    const v = tiers[vehicle] ?? tiers.bike;
+    const chargeableDistance = Math.max(0, distanceKm - v.baseDistance);
 
-    const surgeAmt = (surge > 1) ? subtotal * (surge - 1) : 0;
-    let total = subtotal + surgeAmt;
+    // ---- Platform fee slab ----
+    const platformFee = (() => {
+      if (distanceKm <= 3) return 5;
+      if (distanceKm <= 5) return 7;
+      if (distanceKm <= 10) return 10;
+      return 15;
+    })();
 
-    if (rate.gstPercent) total += total * (rate.gstPercent / 100);
-    if (rate.minFare) total = Math.max(total, rate.minFare);
+    // ---- Effective weights for realistic fares ----
+    const distWeight = distanceKm < 5 ? 1.15 : 1.0;
+    const timeWeight = distanceKm < 5 ? 1.1 : 1.0;
+
+    const distanceFare = v.perKm(distanceKm) * chargeableDistance * distWeight;
+    const timeFare = (typeof v.timeRate === 'function' ? v.timeRate(distanceKm) : v.timeRate) * durationMin * timeWeight;
+
+    let total = v.baseFare + distanceFare + timeFare + platformFee;
+
+    // ---- Apply minimum fare safeguard ----
+    total = Math.max(total, v.minFare);
+
+    // ---- Apply surge if any ----
+    total *= surge;
+
+    // ---- Round to nearest ₹5 ----
+    total = Math.round(total / 5) * 5;
 
     return {
       type: 'short',
-      breakdown: { ...farePieces, surgeAmt },
-      total: Math.round(total),
+      breakdown: { baseFare: v.baseFare, distanceFare, timeFare, platformFee },
+      total
     };
   }
 
   /* ════════════════════════════════════════════════════
-     LONG‑TRIP  (car / premium / xl)
+     LONG-TRIP  (car / premium / xl)
      ════════════════════════════════════════════════════ */
   else if (category === 'long') {
     const vehicleType = rate.vehicleType;
@@ -116,7 +174,6 @@ export function calcFare({
     };
   }
 
-  // ❌ Invalid category
   else {
     throw new Error(`Unknown category: ${category}`);
   }

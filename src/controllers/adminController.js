@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import Trip from "../models/Trip.js";
 import User from "../models/User.js";
 import DriverDoc from "../models/DriverDoc.js";
+import Notification from "../models/Notification.js";  // ✅ ADD THIS
 import { sendToDriver, sendToCustomer } from "../utils/fcmSender.js";
 import { verifyAdminToken } from "../middlewares/adminAuth.js";
 
@@ -219,48 +220,169 @@ export const cancelTrip = async (req, res) => {
 };
 
 // ======================================================================
-// 📨 Push Notifications
+// 📨 Push Notifications (WITH STORAGE)
 // ======================================================================
 export const sendPushToUsers = async (req, res) => {
   try {
-    const { title, body, role } = req.body;
+    const { title, body, role, type = "general" } = req.body;
     const filter = role ? { isDriver: role === "driver" } : {};
     const users = await User.find(filter);
 
     let count = 0;
+    const notifications = [];
+
     for (const user of users) {
+      // Store notification in database
+      notifications.push({
+        userId: user._id,
+        title,
+        body,
+        type,
+        isRead: false,
+      });
+
+      // Send push notification
       if (user.fcmToken) {
         if (role === "driver") await sendToDriver(user.fcmToken, title, body);
         else await sendToCustomer(user.fcmToken, title, body);
         count++;
       }
     }
-    res.status(200).json({ message: `Push sent to ${count} user(s).` });
+
+    // Bulk insert notifications
+    await Notification.insertMany(notifications);
+
+    res.status(200).json({ 
+      message: `Push sent to ${count} user(s) and stored ${notifications.length} notifications.` 
+    });
   } catch (err) {
     console.error("❌ Push error:", err);
     res.status(500).json({ message: "Failed to send push." });
   }
 };
 
-// 🆕 Individual Push Notification
+// 🆕 Individual Push Notification (WITH STORAGE)
 export const sendPushToIndividual = async (req, res) => {
   try {
-    const { title, body, userId } = req.body;
+    const { title, body, userId, type = "general" } = req.body;
     const user = await User.findById(userId);
-    if (!user || !user.fcmToken) {
-      return res.status(404).json({ message: "User not found or no FCM token." });
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
     }
 
-    if (user.isDriver) {
-      await sendToDriver(user.fcmToken, title, body);
-    } else {
-      await sendToCustomer(user.fcmToken, title, body);
+    // Store notification
+    await Notification.create({
+      userId: user._id,
+      title,
+      body,
+      type,
+      isRead: false,
+    });
+
+    // Send push notification
+    if (user.fcmToken) {
+      if (user.isDriver) {
+        await sendToDriver(user.fcmToken, title, body);
+      } else {
+        await sendToCustomer(user.fcmToken, title, body);
+      }
     }
 
-    res.status(200).json({ message: `Push sent to ${user.name}` });
+    res.status(200).json({ message: `Push sent and stored for ${user.name}` });
   } catch (err) {
     console.error("❌ Push error (individual):", err);
     res.status(500).json({ message: "Failed to send push." });
+  }
+};
+
+// ======================================================================
+// 🔔 Notification Management
+// ======================================================================
+
+// Get user's notifications
+export const getUserNotifications = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 50, page = 1 } = req.query;
+
+    const notifications = await Notification.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip((parseInt(page) - 1) * parseInt(limit));
+
+    const unreadCount = await Notification.countDocuments({ 
+      userId, 
+      isRead: false 
+    });
+
+    res.status(200).json({
+      message: "Notifications fetched successfully",
+      notifications,
+      unreadCount,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching notifications:", err);
+    res.status(500).json({ message: "Server error while fetching notifications." });
+  }
+};
+
+// Mark notification as read
+export const markNotificationAsRead = async (req, res) => {
+  try {
+    const { notificationId } = req.params;
+    
+    const notification = await Notification.findByIdAndUpdate(
+      notificationId,
+      { isRead: true },
+      { new: true }
+    );
+
+    if (!notification) {
+      return res.status(404).json({ message: "Notification not found" });
+    }
+
+    res.status(200).json({ 
+      message: "Notification marked as read", 
+      notification 
+    });
+  } catch (err) {
+    console.error("❌ Error marking notification as read:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// Mark all notifications as read
+export const markAllNotificationsAsRead = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    await Notification.updateMany(
+      { userId, isRead: false },
+      { isRead: true }
+    );
+
+    res.status(200).json({ message: "All notifications marked as read" });
+  } catch (err) {
+    console.error("❌ Error marking all as read:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// Delete notification
+export const deleteNotification = async (req, res) => {
+  try {
+    const { notificationId } = req.params;
+    
+    const notification = await Notification.findByIdAndDelete(notificationId);
+    
+    if (!notification) {
+      return res.status(404).json({ message: "Notification not found" });
+    }
+
+    res.status(200).json({ message: "Notification deleted successfully" });
+  } catch (err) {
+    console.error("❌ Error deleting notification:", err);
+    res.status(500).json({ message: "Server error" });
   }
 };
 

@@ -26,6 +26,12 @@ import {
   sendPushToUsers,
   sendPushToIndividual,
 
+  // Notifications  // ✅ ADD THIS
+  getUserNotifications,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  deleteNotification,
+
   // Documents
   getDriverDocuments,
   verifyDriverDocument,
@@ -61,6 +67,12 @@ router.put("/trip/:tripId/cancel", verifyAdminToken, cancelTrip);
 // 📨 Push Notifications
 router.post("/send-fcm", verifyAdminToken, sendPushToUsers);
 router.post("/send-fcm/individual", verifyAdminToken, sendPushToIndividual);
+
+// 🔔 Notifications (NEW - ✅ ADD THESE 4 ROUTES)
+router.get("/notifications/user/:userId", getUserNotifications);
+router.put("/notifications/:notificationId/read", markNotificationAsRead);
+router.put("/notifications/user/:userId/read-all", markAllNotificationsAsRead);
+router.delete("/notifications/:notificationId", deleteNotification);
 
 // 📄 Documents
 router.get("/documents/pending", verifyAdminToken, getPendingDocuments);
