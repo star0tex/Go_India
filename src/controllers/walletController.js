@@ -1,4 +1,4 @@
-// walletController.js - SECURE UPI PAYMENT WITH RAZORPAY
+// walletController.js - SECURE UPI PAYMENT WITH RAZORPAY + INCENTIVES
 import mongoose from 'mongoose';
 import Wallet from '../models/Wallet.js';
 import Trip from '../models/Trip.js';
@@ -6,6 +6,7 @@ import User from '../models/User.js';
 import { io } from '../socket/socketHandler.js';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
+import axios from 'axios';
 
 // ✅ Initialize Razorpay with enhanced security
 const initializeRazorpay = () => {
@@ -18,7 +19,6 @@ const initializeRazorpay = () => {
     throw new Error('Razorpay credentials not configured');
   }
 
-  // Validate credential format
   if (!keyId.startsWith('rzp_test_') && !keyId.startsWith('rzp_live_')) {
     console.warn('⚠️  Warning: Razorpay Key ID format incorrect');
   }
@@ -41,13 +41,12 @@ try {
 // Configuration
 const COMMISSION_PERCENTAGE = 15;
 const PAISA_MULTIPLIER = 100;
-const MAX_PAYMENT_AMOUNT = 100000; // ₹100,000 max
-const MIN_PAYMENT_AMOUNT = 1; // ₹1 min
+const MAX_PAYMENT_AMOUNT = 100000;
+const MIN_PAYMENT_AMOUNT = 1;
 
 const toPaisa = (rupees) => Math.round(rupees * PAISA_MULTIPLIER);
 const toRupees = (paisa) => paisa / PAISA_MULTIPLIER;
 
-// ✅ Payment state tracking to prevent duplicate processing
 const paymentProcessing = new Map();
 
 const calculateFareBreakdown = (tripFare) => {
@@ -60,6 +59,35 @@ const calculateFareBreakdown = (tripFare) => {
     commission: toRupees(commissionInPaisa),
     driverEarning: toRupees(driverEarningInPaisa),
     commissionPercentage: COMMISSION_PERCENTAGE
+  };
+};
+
+// 🆕 UPDATED: Calculate wallet balance from transactions
+const calculateWalletBalance = (transactions) => {
+  let totalEarnings = 0;
+  let totalCommission = 0;
+  let pendingAmount = 0;
+  let availableBalance = 0;
+
+  transactions.forEach(t => {
+    if (t.status !== 'completed') return;
+
+    if (t.type === 'credit') {
+      totalEarnings += t.amount;
+      availableBalance += t.amount;
+    } else if (t.type === 'commission') {
+      totalCommission += t.amount;
+      pendingAmount += t.amount;
+    } else if (t.type === 'debit') {
+      pendingAmount -= t.amount;
+    }
+  });
+
+  return {
+    totalEarnings: Number(totalEarnings.toFixed(2)),
+    totalCommission: Number(totalCommission.toFixed(2)),
+    pendingAmount: Math.max(0, Number(pendingAmount.toFixed(2))),
+    availableBalance: Number(availableBalance.toFixed(2))
   };
 };
 
@@ -86,13 +114,51 @@ const getOrCreateWallet = async (driverId, session = null) => {
   return wallet;
 };
 
-/**
- * ✅ CREATE RAZORPAY ORDER (SECURE)
- * POST /api/wallet/create-order
- */
+// 🆕 Helper function to add ride incentive
+const addRideIncentive = async (userId, tripId) => {
+  try {
+    const baseUrl = process.env.API_BASE_URL || 'https://1f4fb8dab9d9.ngrok-free.app';
+    
+    console.log('📞 Calling incentive API:', {
+      url: `${baseUrl}/api/incentives/add-ride-incentive`,
+      userId,
+      tripId
+    });
+    
+    const response = await axios.post(
+      `${baseUrl}/api/incentives/add-ride-incentive`, 
+      {
+        userId,
+        tripId
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        timeout: 5000 // 5 second timeout
+      }
+    );
+
+    if (response.data.success) {
+      console.log('✅ Ride incentive added:', response.data.data);
+      return response.data.data;
+    } else {
+      console.error('❌ Incentive API returned error:', response.data);
+      return null;
+    }
+  } catch (error) {
+    console.error('❌ Error adding ride incentive:', {
+      message: error.message,
+      response: error.response?.data,
+      status: error.response?.status,
+      url: error.config?.url
+    });
+    return null;
+  }
+};
+
 const createRazorpayOrder = async (req, res) => {
   try {
-    // Security: Check if Razorpay is initialized
     if (!razorpay) {
       return res.status(503).json({
         success: false,
@@ -103,7 +169,6 @@ const createRazorpayOrder = async (req, res) => {
 
     const { driverId, amount } = req.body;
 
-    // Validate input
     if (!driverId || !mongoose.Types.ObjectId.isValid(driverId)) {
       return res.status(400).json({
         success: false,
@@ -111,7 +176,6 @@ const createRazorpayOrder = async (req, res) => {
       });
     }
 
-    // Validate amount
     if (!amount || isNaN(amount) || amount <= 0) {
       return res.status(400).json({
         success: false,
@@ -119,7 +183,6 @@ const createRazorpayOrder = async (req, res) => {
       });
     }
 
-    // Security: Amount limits
     if (amount < MIN_PAYMENT_AMOUNT) {
       return res.status(400).json({
         success: false,
@@ -134,7 +197,6 @@ const createRazorpayOrder = async (req, res) => {
       });
     }
 
-    // Verify driver exists
     const driver = await User.findById(driverId).select('_id role');
     if (!driver || driver.role !== 'driver') {
       return res.status(404).json({
@@ -143,33 +205,21 @@ const createRazorpayOrder = async (req, res) => {
       });
     }
 
-    // Get wallet and verify pending amount
     const wallet = await getOrCreateWallet(driverId);
 
-    if (amount > wallet.pendingAmount + 0.01) { // 1 paisa tolerance
+    if (amount > wallet.pendingAmount + 0.01) {
       return res.status(400).json({
         success: false,
         message: `Amount exceeds pending commission (₹${wallet.pendingAmount.toFixed(2)})`
       });
     }
 
-    // Security: Check for duplicate order creation
-    const recentOrder = wallet.transactions.find(t => 
-      t.razorpayOrderId && 
-      t.createdAt > new Date(Date.now() - 5 * 60 * 1000) // Last 5 minutes
-    );
-
-    if (recentOrder) {
-      console.log('⚠️  Recent order exists, checking status...');
-    }
-
-    // Create secure receipt ID (max 40 chars)
     const timestamp = Date.now().toString().slice(-10);
     const driverIdShort = driverId.toString().slice(-8);
     const receipt = `rcpt_${driverIdShort}_${timestamp}`;
     
     const options = {
-      amount: toPaisa(amount), // Convert to paise
+      amount: toPaisa(amount),
       currency: 'INR',
       receipt: receipt,
       notes: {
@@ -177,7 +227,7 @@ const createRazorpayOrder = async (req, res) => {
         purpose: 'commission_payment',
         timestamp: new Date().toISOString()
       },
-      payment_capture: 1 // Auto-capture payment
+      payment_capture: 1
     };
 
     console.log('Creating Razorpay order:', {
@@ -186,12 +236,10 @@ const createRazorpayOrder = async (req, res) => {
       driverId
     });
 
-    // Create order with Razorpay
     const order = await razorpay.orders.create(options);
 
     console.log('✅ Order created:', order.id);
 
-    // Store order reference in wallet (optional tracking)
     await Wallet.findOneAndUpdate(
       { driverId },
       {
@@ -245,15 +293,10 @@ const createRazorpayOrder = async (req, res) => {
   }
 };
 
-/**
- * ✅ VERIFY RAZORPAY PAYMENT (MAXIMUM SECURITY)
- * POST /api/wallet/verify-payment
- */
 const verifyRazorpayPayment = async (req, res) => {
   let session = null;
 
   try {
-    // Security: Check Razorpay initialization
     if (!razorpay) {
       return res.status(503).json({
         success: false,
@@ -264,7 +307,6 @@ const verifyRazorpayPayment = async (req, res) => {
 
     const { driverId, paymentId, orderId, signature } = req.body;
 
-    // Validate all required fields
     if (!driverId || !paymentId || !orderId || !signature) {
       return res.status(400).json({
         success: false,
@@ -272,7 +314,6 @@ const verifyRazorpayPayment = async (req, res) => {
       });
     }
 
-    // Validate driver ID
     if (!mongoose.Types.ObjectId.isValid(driverId)) {
       return res.status(400).json({
         success: false,
@@ -280,7 +321,6 @@ const verifyRazorpayPayment = async (req, res) => {
       });
     }
 
-    // Security: Prevent duplicate processing
     const processingKey = `${driverId}-${paymentId}`;
     if (paymentProcessing.has(processingKey)) {
       console.log('⚠️  Payment already being processed:', paymentId);
@@ -291,10 +331,8 @@ const verifyRazorpayPayment = async (req, res) => {
       });
     }
 
-    // Mark as processing
     paymentProcessing.set(processingKey, Date.now());
 
-    // Security: Verify signature FIRST (before any DB operations)
     const keySecret = process.env.RAZORPAY_KEY_SECRET;
     const generatedSignature = crypto
       .createHmac('sha256', keySecret)
@@ -304,8 +342,6 @@ const verifyRazorpayPayment = async (req, res) => {
     if (generatedSignature !== signature) {
       paymentProcessing.delete(processingKey);
       console.error('❌ SIGNATURE MISMATCH - POSSIBLE FRAUD ATTEMPT');
-      console.error('Expected:', generatedSignature);
-      console.error('Received:', signature);
       
       return res.status(400).json({
         success: false,
@@ -316,14 +352,11 @@ const verifyRazorpayPayment = async (req, res) => {
 
     console.log('✅ Signature verified successfully');
 
-    // Fetch payment details from Razorpay to double-check
     const payment = await razorpay.payments.fetch(paymentId);
 
     console.log('Payment status:', payment.status);
     console.log('Payment amount:', payment.amount, 'paise');
-    console.log('Payment order_id:', payment.order_id);
 
-    // Security: Verify payment status
     if (payment.status !== 'captured' && payment.status !== 'authorized') {
       paymentProcessing.delete(processingKey);
       return res.status(400).json({
@@ -333,10 +366,8 @@ const verifyRazorpayPayment = async (req, res) => {
       });
     }
 
-    // Security: Verify order ID matches
     if (payment.order_id !== orderId) {
       paymentProcessing.delete(processingKey);
-      console.error('❌ Order ID mismatch');
       return res.status(400).json({
         success: false,
         message: 'Payment verification failed - order mismatch',
@@ -346,7 +377,6 @@ const verifyRazorpayPayment = async (req, res) => {
 
     const amount = toRupees(payment.amount);
 
-    // Security: Check if this payment was already processed
     const existingTransaction = await Wallet.findOne({
       driverId,
       'transactions.razorpayPaymentId': paymentId
@@ -359,37 +389,31 @@ const verifyRazorpayPayment = async (req, res) => {
       
       if (existingTxn) {
         paymentProcessing.delete(processingKey);
-        console.log('⚠️  Payment already processed:', paymentId);
+        
+        // Recalculate balances
+        const balances = calculateWalletBalance(existingTransaction.transactions);
+        
         return res.status(200).json({
           success: true,
           message: 'Payment already processed',
-          wallet: {
-            totalEarnings: Number(existingTransaction.totalEarnings.toFixed(2)),
-            totalCommission: Number(existingTransaction.totalCommission.toFixed(2)),
-            pendingAmount: Number(existingTransaction.pendingAmount.toFixed(2)),
-            availableBalance: Number(existingTransaction.availableBalance.toFixed(2)),
-          }
+          wallet: balances
         });
       }
     }
 
-    // Start database transaction
     session = await mongoose.startSession();
     session.startTransaction();
 
-    // Get wallet with lock
     const wallet = await Wallet.findOne({ driverId }).session(session);
     
     if (!wallet) {
       throw new Error('Wallet not found');
     }
 
-    // Security: Verify amount doesn't exceed pending
     if (amount > wallet.pendingAmount + 0.01) {
       throw new Error(`Amount (₹${amount}) exceeds pending commission (₹${wallet.pendingAmount.toFixed(2)})`);
     }
 
-    // Update wallet - deduct pending amount
     const updatedWallet = await Wallet.findOneAndUpdate(
       { driverId },
       {
@@ -415,49 +439,34 @@ const verifyRazorpayPayment = async (req, res) => {
       { new: true, session }
     );
 
-    // Commit transaction
     await session.commitTransaction();
 
-    // Remove from processing map
     paymentProcessing.delete(processingKey);
+
+    // 🆕 Recalculate accurate balances
+    const balances = calculateWalletBalance(updatedWallet.transactions);
 
     console.log('');
     console.log('='.repeat(70));
     console.log('💳 PAYMENT VERIFIED & PROCESSED');
     console.log(`   Payment ID: ${paymentId}`);
-    console.log(`   Order ID: ${orderId}`);
     console.log(`   Driver ID: ${driverId}`);
     console.log(`   Amount: ₹${amount}`);
-    console.log(`   Method: ${payment.method || 'unknown'}`);
-    console.log(`   Status: ${payment.status}`);
     console.log('='.repeat(70));
-    console.log('');
 
-    // Emit real-time update to driver
     const driver = await User.findById(driverId).select('socketId').lean();
     if (driver?.socketId) {
       io.to(driver.socketId).emit('wallet:updated', {
-        wallet: {
-          totalEarnings: Number(updatedWallet.totalEarnings.toFixed(2)),
-          totalCommission: Number(updatedWallet.totalCommission.toFixed(2)),
-          pendingAmount: Number(updatedWallet.pendingAmount.toFixed(2)),
-          availableBalance: Number(updatedWallet.availableBalance.toFixed(2)),
-        },
+        wallet: balances,
         message: 'Commission payment successful',
         paymentId: paymentId
       });
-      console.log('📢 Real-time update sent to driver');
     }
 
     res.status(200).json({
       success: true,
       message: 'Payment verified and commission cleared',
-      wallet: {
-        totalEarnings: Number(updatedWallet.totalEarnings.toFixed(2)),
-        totalCommission: Number(updatedWallet.totalCommission.toFixed(2)),
-        pendingAmount: Number(updatedWallet.pendingAmount.toFixed(2)),
-        availableBalance: Number(updatedWallet.availableBalance.toFixed(2)),
-      },
+      wallet: balances,
       paymentDetails: {
         paymentId: paymentId,
         amount: amount,
@@ -467,12 +476,10 @@ const verifyRazorpayPayment = async (req, res) => {
     });
 
   } catch (err) {
-    // Rollback transaction on error
     if (session && session.inTransaction()) {
       await session.abortTransaction();
     }
 
-    // Remove from processing map
     if (req.body.driverId && req.body.paymentId) {
       paymentProcessing.delete(`${req.body.driverId}-${req.body.paymentId}`);
     }
@@ -494,10 +501,6 @@ const verifyRazorpayPayment = async (req, res) => {
   }
 };
 
-/**
- * Get wallet details for a driver
- * GET /api/wallet/:driverId
- */
 const getWalletByDriverId = async (req, res) => {
   try {
     const { driverId } = req.params;
@@ -511,7 +514,9 @@ const getWalletByDriverId = async (req, res) => {
 
     const wallet = await getOrCreateWallet(driverId);
 
-    // Filter only completed transactions for display
+    // 🆕 Recalculate balances from transactions
+    const balances = calculateWalletBalance(wallet.transactions);
+
     const recentTransactions = wallet.transactions
       .filter(t => !t.status || t.status === 'completed')
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
@@ -519,12 +524,7 @@ const getWalletByDriverId = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      wallet: {
-        totalEarnings: Number(wallet.totalEarnings.toFixed(2)),
-        totalCommission: Number(wallet.totalCommission.toFixed(2)),
-        pendingAmount: Number(wallet.pendingAmount.toFixed(2)),
-        availableBalance: Number(wallet.availableBalance.toFixed(2)),
-      },
+      wallet: balances,
       recentTransactions,
     });
   } catch (err) {
@@ -537,10 +537,6 @@ const getWalletByDriverId = async (req, res) => {
   }
 };
 
-/**
- * Get payment proofs (for backward compatibility)
- * GET /api/wallet/payment-proof/:driverId
- */
 const getPaymentProofs = async (req, res) => {
   try {
     const { driverId } = req.params;
@@ -561,7 +557,6 @@ const getPaymentProofs = async (req, res) => {
       });
     }
 
-    // Get pending transactions as "proofs"
     const proofs = wallet.transactions
       .filter(t => t.status === 'pending' && t.razorpayPaymentId)
       .map(t => ({
@@ -588,7 +583,7 @@ const getPaymentProofs = async (req, res) => {
 
 /**
  * Process cash collection after trip completion
- * POST /api/wallet/collect-cash
+ * 🆕 Now also adds per-ride incentive to wallet
  */
 const processCashCollection = async (req, res) => {
   const session = await mongoose.startSession();
@@ -699,15 +694,20 @@ const processCashCollection = async (req, res) => {
     console.log(`   Commission: ₹${fareBreakdown.commission}`);
     console.log('='.repeat(70));
 
+    // 🆕 ADD PER-RIDE INCENTIVE (non-blocking)
+    addRideIncentive(driverId, tripId).then((incentiveData) => {
+      if (incentiveData) {
+        console.log('💎 Per-ride incentive added:', incentiveData);
+      }
+    }).catch(err => {
+      console.error('Error adding incentive:', err);
+    });
+
+    // 🆕 Recalculate accurate balances
+    const balances = calculateWalletBalance(wallet.transactions);
+
     const driver = await User.findById(driverId).select('socketId').lean();
     const customer = await User.findById(trip.customerId).select('socketId').lean();
-
-    const walletInfo = {
-      totalEarnings: Number(wallet.totalEarnings.toFixed(2)),
-      totalCommission: Number(wallet.totalCommission.toFixed(2)),
-      pendingAmount: Number(wallet.pendingAmount.toFixed(2)),
-      availableBalance: Number(wallet.availableBalance.toFixed(2)),
-    };
 
     if (driver?.socketId) {
       io.to(driver.socketId).emit('wallet:updated', {
@@ -717,10 +717,9 @@ const processCashCollection = async (req, res) => {
           commissionPercentage: fareBreakdown.commissionPercentage,
           driverEarning: Number(fareBreakdown.driverEarning.toFixed(2))
         },
-        wallet: walletInfo,
+        wallet: balances,
         message: 'Cash collected successfully',
       });
-      console.log(`📢 wallet:updated emitted to driver ${driverId}`);
     }
 
     if (customer?.socketId) {
@@ -729,7 +728,6 @@ const processCashCollection = async (req, res) => {
         message: 'Payment confirmed. Thank you for riding with us!',
         timestamp: new Date().toISOString()
       });
-      console.log(`📢 trip:cash_collected emitted to customer ${trip.customerId}`);
     }
 
     await User.findByIdAndUpdate(driverId, {
@@ -739,8 +737,6 @@ const processCashCollection = async (req, res) => {
         canReceiveNewRequests: false
       }
     });
-    console.log(`✅ Driver ${driverId} status cleared`);
-    console.log('='.repeat(70));
 
     res.status(200).json({
       success: true,
@@ -751,7 +747,7 @@ const processCashCollection = async (req, res) => {
         commissionPercentage: fareBreakdown.commissionPercentage,
         driverEarning: Number(fareBreakdown.driverEarning.toFixed(2))
       },
-      wallet: walletInfo,
+      wallet: balances,
     });
   } catch (err) {
     if (session.inTransaction()) {
@@ -853,10 +849,10 @@ const getTodayEarnings = async (req, res) => {
   }
 };
 
-// Cleanup old processing entries (run periodically)
+// Cleanup old processing entries
 setInterval(() => {
   const now = Date.now();
-  const timeout = 10 * 60 * 1000; // 10 minutes
+  const timeout = 10 * 60 * 1000;
   
   for (const [key, timestamp] of paymentProcessing.entries()) {
     if (now - timestamp > timeout) {
@@ -864,7 +860,7 @@ setInterval(() => {
       console.log('🧹 Cleaned up stale payment processing entry:', key);
     }
   }
-}, 5 * 60 * 1000); // Run every 5 minutes
+}, 5 * 60 * 1000);
 
 export {
   getWalletByDriverId,

@@ -124,10 +124,12 @@ export const uploadDriverDocument = async (req, res) => {
  */
 // In documentController.js
 // src/controllers/documentController.js
+// Fixed getDriverDocuments in documentController.js
 export const getDriverDocuments = async (req, res) => {
   const { driverId } = req.params;
 
   try {
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
     const docs = await DriverDoc.find({ userId: driverId }).lean();
     
     // Get driver's vehicle type
@@ -138,20 +140,44 @@ export const getDriverDocuments = async (req, res) => {
       return res.status(200).json({ 
         message: "No documents found for this driver.", 
         docs: [],
-        vehicleType // Include vehicle type
+        vehicleType
       });
     }
 
+    // Add full image URLs
+    const docsWithImageUrl = docs.map((doc) => {
+      let imageUrl = null;
+      
+      if (doc.url) {
+        // Normalize path
+        let cleanPath = doc.url.replace(/\\/g, "/");
+        
+        // Extract path starting from 'uploads/'
+        const uploadsIndex = cleanPath.indexOf('uploads/');
+        if (uploadsIndex !== -1) {
+          cleanPath = cleanPath.substring(uploadsIndex);
+        }
+        
+        imageUrl = `${baseUrl}/${cleanPath}`;
+        
+        console.log(`📸 Document URL: ${imageUrl}`); // Debug
+      }
+      
+      return {
+        ...doc,
+        imageUrl
+      };
+    });
+
     res.status(200).json({ 
-      docs,
-      vehicleType // Include vehicle type
+      docs: docsWithImageUrl,
+      vehicleType
     });
   } catch (err) {
     console.error("❌ Error fetching driver documents:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 };
-
 /**
  * @desc    Get driver details by ID
  * @route   GET /api/driver/:driverId

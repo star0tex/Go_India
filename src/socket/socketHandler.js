@@ -26,6 +26,87 @@ const DISTANCE_LIMITS = {
   long_same_day: 20000,
   long_multi_day: 50000,
 };
+/**
+ * Award incentives to driver after ride completion
+ * Internal function - no HTTP needed
+ */
+async function awardIncentivesToDriver(driverId, tripId) {
+  try {
+    console.log('');
+    console.log('💰 AWARDING INCENTIVES (Socket)');
+    console.log(`   Driver ID: ${driverId}`);
+    console.log(`   Trip ID: ${tripId}`);
+
+    // Get incentive settings
+    const db = mongoose.connection.db;
+    const IncentiveSettings = db.collection('incentiveSettings');
+    const settings = await IncentiveSettings.findOne({ type: 'global' });
+
+    if (!settings || (settings.perRideIncentive === 0 && settings.perRideCoins === 0)) {
+      console.log('   ⚠️ No incentives configured - skipping');
+      return { success: true, awarded: false };
+    }
+
+    console.log(`   Settings: ₹${settings.perRideIncentive} + ${settings.perRideCoins} coins`);
+
+    // Get driver
+    const driver = await User.findById(driverId)
+      .select('name phone totalCoinsCollected totalIncentiveEarned totalRidesCompleted wallet');
+
+    if (!driver) {
+      console.log('   ❌ Driver not found');
+      return { success: false, error: 'Driver not found' };
+    }
+
+    // Calculate new values
+    const currentCoins = driver.totalCoinsCollected || 0;
+    const currentIncentive = driver.totalIncentiveEarned || 0.0;
+    const currentRides = driver.totalRidesCompleted || 0;
+    const currentWallet = driver.wallet || 0;
+
+    const newCoins = currentCoins + settings.perRideCoins;
+    const newIncentive = currentIncentive + settings.perRideIncentive;
+    const newRides = currentRides + 1;
+    const newWallet = currentWallet + settings.perRideIncentive;
+
+    // Update driver with incentives
+    await User.findByIdAndUpdate(driverId, {
+      $set: {
+        totalCoinsCollected: newCoins,
+        totalIncentiveEarned: newIncentive,
+        totalRidesCompleted: newRides,
+        wallet: newWallet,
+        lastRideId: tripId,
+        lastIncentiveAwardedAt: new Date()
+      }
+    });
+
+    console.log('   ✅ Incentives awarded successfully:');
+    console.log(`      Driver: ${driver.name} (${driver.phone})`);
+    console.log(`      Coins: ${currentCoins} → ${newCoins} (+${settings.perRideCoins})`);
+    console.log(`      Cash: ₹${currentIncentive.toFixed(2)} → ₹${newIncentive.toFixed(2)} (+₹${settings.perRideIncentive})`);
+    console.log(`      Wallet: ₹${currentWallet.toFixed(2)} → ₹${newWallet.toFixed(2)}`);
+    console.log(`      Total Rides: ${currentRides} → ${newRides}`);
+    console.log('');
+
+    return {
+      success: true,
+      awarded: true,
+      coins: settings.perRideCoins,
+      cash: settings.perRideIncentive,
+      newTotals: {
+        coins: newCoins,
+        incentive: newIncentive,
+        rides: newRides,
+        wallet: newWallet
+      }
+    };
+
+  } catch (error) {
+    console.error('   ❌ Error awarding incentives:', error);
+    return { success: false, error: error.message };
+  }
+}
 
 const normalizePhone = (phone) => {
   if (!phone) return null;
@@ -544,75 +625,93 @@ export const initSocket = (ioInstance) => {
     });
 
     // DRIVER COMPLETE RIDE (keeps driver busy until cash collected)
-    socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLng }) => {
-      try {
-        const trip = await Trip.findById(tripId);
-        if (!trip) {
-          socket.emit('trip:complete_error', { message: 'Trip not found' });
-          return;
-        }
+socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLng }) => {
+  try {
+    const trip = await Trip.findById(tripId);
+    if (!trip) {
+      socket.emit('trip:complete_error', { message: 'Trip not found' });
+      return;
+    }
 
-        if (trip.status !== 'ride_started') {
-          socket.emit('trip:complete_error', { message: 'Ride has not started yet' });
-          return;
-        }
+    if (trip.status !== 'ride_started') {
+      socket.emit('trip:complete_error', { message: 'Ride has not started yet' });
+      return;
+    }
 
-        const fare = trip.estimatedFare || trip.fare || 100;
+    const fare = trip.estimatedFare || trip.fare || 100;
 
-        await Trip.findByIdAndUpdate(tripId, {
-          $set: {
-            status: 'completed',
-            rideStatus: 'completed',
-            rideEndTime: new Date(),
-            finalFare: fare,
-            paymentCollected: false,
-            paymentCollectedAt: null
-          }
-        });
-
-        await User.findByIdAndUpdate(driverId, {
-          $set: {
-            currentTripId: tripId,
-            isBusy: true,
-            canReceiveNewRequests: false,
-            awaitingCashCollection: true,
-            lastTripCompletedAt: new Date()
-          }
-        });
-
-        // Notify customer
-        const customerIdStr = trip.customerId.toString();
-        let customerSocketId = null;
-        for (const [socketId, custId] of connectedCustomers.entries()) {
-          if (custId === customerIdStr) {
-            customerSocketId = socketId;
-            break;
-          }
-        }
-
-        const rideCompletedPayload = {
-          tripId: tripId.toString(),
-          fare,
-          message: 'Ride completed',
-          timestamp: new Date().toISOString()
-        };
-
-        if (customerSocketId) {
-          io.to(customerSocketId).emit('trip:completed', rideCompletedPayload);
-        }
-
-        socket.emit('trip:completed', {
-          ...rideCompletedPayload,
-          message: 'Ride completed. Please collect ₹' + fare.toFixed(2) + ' from customer.',
-          awaitingCashCollection: true
-        });
-
-      } catch (e) {
-        console.error('❌ driver:complete_ride error:', e);
-        socket.emit('trip:complete_error', { message: 'Failed to complete ride: ' + e.message });
+    await Trip.findByIdAndUpdate(tripId, {
+      $set: {
+        status: 'completed',
+        rideStatus: 'completed',
+        rideEndTime: new Date(),
+        finalFare: fare,
+        paymentCollected: false,
+        paymentCollectedAt: null
       }
     });
 
+    // 💰 AWARD INCENTIVES TO DRIVER (NEW)
+    try {
+      const incentiveResult = await awardIncentivesToDriver(driverId, tripId);
+      if (incentiveResult.awarded) {
+        console.log(`🎉 Driver earned: ₹${incentiveResult.cash} + ${incentiveResult.coins} coins`);
+        
+        // Notify driver of incentives earned
+        socket.emit('incentives:awarded', {
+          coins: incentiveResult.coins,
+          cash: incentiveResult.cash,
+          message: `You earned ₹${incentiveResult.cash} + ${incentiveResult.coins} coins!`,
+          newTotals: incentiveResult.newTotals,
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (incentiveError) {
+      console.error('⚠️ Failed to award incentives:', incentiveError);
+    }
+
+    await User.findByIdAndUpdate(driverId, {
+      $set: {
+        currentTripId: tripId,
+        isBusy: true,
+        canReceiveNewRequests: false,
+        awaitingCashCollection: true,
+        lastTripCompletedAt: new Date()
+      }
+    });
+
+    // Notify customer
+    const customerIdStr = trip.customerId.toString();
+    let customerSocketId = null;
+    for (const [socketId, custId] of connectedCustomers.entries()) {
+      if (custId === customerIdStr) {
+        customerSocketId = socketId;
+        break;
+      }
+    }
+
+    const rideCompletedPayload = {
+      tripId: tripId.toString(),
+      fare,
+      message: 'Ride completed',
+      timestamp: new Date().toISOString()
+    };
+
+    if (customerSocketId) {
+      io.to(customerSocketId).emit('trip:completed', rideCompletedPayload);
+    }
+
+    socket.emit('trip:completed', {
+      ...rideCompletedPayload,
+      message: 'Ride completed. Please collect ₹' + fare.toFixed(2) + ' from customer.',
+      awaitingCashCollection: true
+    });
+
+  } catch (e) {
+    console.error('❌ driver:complete_ride error:', e);
+    socket.emit('trip:complete_error', { message: 'Failed to complete ride: ' + e.message });
+  }
+});
     // DRIVER GOING TO PICKUP
     socket.on('driver:going_to_pickup', async ({ tripId, driverId }) => {
       try {

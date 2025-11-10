@@ -5,10 +5,11 @@ import mongoose from "mongoose";
 const driverDocSchema = new mongoose.Schema(
   {
     userId: {
-  type: String, // ✅ Instead of ObjectId
-      ref: "User",
-      required: true,
-    },
+  type: mongoose.Schema.Types.ObjectId,
+  ref: "User",
+  required: true,
+},
+
 
     // 📄 Type of document: Aadhaar, PAN, DL, etc.
     docType: {
@@ -25,7 +26,7 @@ const driverDocSchema = new mongoose.Schema(
     // ✅ Document verification status
     status: {
       type: String,
-      enum: ["pending", "verified", "rejected"],
+      enum: ["pending", "approved", "rejected"],
       default: "pending",
     },
 

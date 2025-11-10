@@ -129,7 +129,7 @@ const userSchema = new mongoose.Schema(
     // ✅ Verification & Documents
     documentStatus: {
       type: String,
-      enum: ["pending", "verified", "rejected"],
+      enum: ["pending", "approved", "rejected"],
       default: "pending",
     },
     isVerified: {
@@ -168,6 +168,41 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null, // ✅ Track socket disconnections
     },
+    // 💰 INCENTIVE SYSTEM FIELDS - ADD THESE
+totalCoinsCollected: {
+  type: Number,
+  default: 0,
+  min: 0,
+},
+totalIncentiveEarned: {
+  type: Number,
+  default: 0.0,
+  min: 0,
+},
+totalRidesCompleted: {
+  type: Number,
+  default: 0,
+  min: 0,
+},
+lastRideId: {
+  type: mongoose.Schema.Types.ObjectId,
+  ref: 'Trip',
+  default: null,
+},
+lastIncentiveAwardedAt: {
+  type: Date,
+  default: null,
+},
+lastWithdrawal: {
+  type: Date,
+  default: null,
+},
+// wallet field should already exist, but if not:
+wallet: {
+  type: Number,
+  default: 0.0,
+  min: 0,
+},
   },
   { 
     timestamps: true,
@@ -175,6 +210,7 @@ const userSchema = new mongoose.Schema(
     minimize: false, // Keep empty objects
   }
 );
+
 
 // ✅ CRITICAL: Compound index for driver availability queries
 userSchema.index({ 

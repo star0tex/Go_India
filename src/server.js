@@ -23,6 +23,7 @@ import walletRoutes from './routes/walletRoutes.js';
 import chatRoutes from './routes/chatRoutes.js'; // 📨 NEW: Import chat routes
 import rideHistoryRoutes from './routes/rideHistory.js';
 import driverRideHistoryRoutes from './routes/driverRideHistory.js';
+import incentiveRoutes from './routes/incentiveRoutes.js';
 
 import standbyReassignCron from './cron/standbyReassignCron.js';
 import { initSocket } from './socket/socketHandler.js';
@@ -67,6 +68,7 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/chat', chatRoutes); // 📨 NEW: Add chat routes
 app.use(rideHistoryRoutes);
 app.use('/api/driver', driverRideHistoryRoutes);
+app.use('/api/incentives', incentiveRoutes);
 
 // ✅ Start Cron (every 2 minutes)
 setInterval(() => {

@@ -1,6 +1,8 @@
 // src/controllers/tripController.js
 import Trip from '../models/Trip.js';
 import User from '../models/User.js';
+import mongoose from 'mongoose';
+
 import { io } from '../socket/socketHandler.js';
 import { broadcastToDrivers } from '../utils/tripBroadcaster.js';
 import { TRIP_LIMITS } from '../config/tripConfig.js';
@@ -64,6 +66,90 @@ async function saveToRideHistory(trip, status = 'Completed') {
     // Don't throw - we don't want to fail the main operation
   }
 }
+
+
+/**
+ * Helper function to award incentives after ride completion
+ * This is called internally - no HTTP request needed
+ */
+async function awardIncentivesToDriver(driverId, tripId) {
+  try {
+    console.log('');
+    console.log('💰 AWARDING INCENTIVES');
+    console.log(`   Driver ID: ${driverId}`);
+    console.log(`   Trip ID: ${tripId}`);
+
+    // Get incentive settings
+    const db = mongoose.connection.db;
+    const IncentiveSettings = db.collection('incentiveSettings');
+    const settings = await IncentiveSettings.findOne({ type: 'global' });
+
+    if (!settings || (settings.perRideIncentive === 0 && settings.perRideCoins === 0)) {
+      console.log('   ⚠️ No incentives configured - skipping');
+      return { success: true, awarded: false };
+    }
+
+    console.log(`   Settings: ₹${settings.perRideIncentive} + ${settings.perRideCoins} coins`);
+
+    // Get driver
+    const driver = await User.findById(driverId)
+      .select('name phone totalCoinsCollected totalIncentiveEarned totalRidesCompleted wallet');
+
+    if (!driver) {
+      console.log('   ❌ Driver not found');
+      return { success: false, error: 'Driver not found' };
+    }
+
+    // Calculate new values
+    const currentCoins = driver.totalCoinsCollected || 0;
+    const currentIncentive = driver.totalIncentiveEarned || 0.0;
+    const currentRides = driver.totalRidesCompleted || 0;
+    const currentWallet = driver.wallet || 0;
+
+    const newCoins = currentCoins + settings.perRideCoins;
+    const newIncentive = currentIncentive + settings.perRideIncentive;
+    const newRides = currentRides + 1;
+    const newWallet = currentWallet + settings.perRideIncentive;
+
+    // Update driver with incentives
+    await User.findByIdAndUpdate(driverId, {
+      $set: {
+        totalCoinsCollected: newCoins,
+        totalIncentiveEarned: newIncentive,
+        totalRidesCompleted: newRides,
+        wallet: newWallet,
+        lastRideId: tripId,
+        lastIncentiveAwardedAt: new Date()
+      }
+    });
+
+    console.log('   ✅ Incentives awarded successfully:');
+    console.log(`      Driver: ${driver.name} (${driver.phone})`);
+    console.log(`      Coins: ${currentCoins} → ${newCoins} (+${settings.perRideCoins})`);
+    console.log(`      Cash: ₹${currentIncentive.toFixed(2)} → ₹${newIncentive.toFixed(2)} (+₹${settings.perRideIncentive})`);
+    console.log(`      Wallet: ₹${currentWallet.toFixed(2)} → ₹${newWallet.toFixed(2)}`);
+    console.log(`      Total Rides: ${currentRides} → ${newRides}`);
+    console.log('');
+
+    return {
+      success: true,
+      awarded: true,
+      coins: settings.perRideCoins,
+      cash: settings.perRideIncentive,
+      newTotals: {
+        coins: newCoins,
+        incentive: newIncentive,
+        rides: newRides,
+        wallet: newWallet
+      }
+    };
+
+  } catch (error) {
+    console.error('   ❌ Error awarding incentives:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 
 function normalizeCoordinates(coords) {
   if (!Array.isArray(coords) || coords.length !== 2) {
@@ -1097,7 +1183,7 @@ const startRide = async (req, res) => {
   }
 };
 
-const completeRideWithVerification = async (req, res) => {
+ const completeRideWithVerification = async (req, res) => {
   try {
     const { tripId, driverId, driverLat, driverLng } = req.body;
 
@@ -1160,6 +1246,17 @@ const completeRideWithVerification = async (req, res) => {
     console.log(`   Status: ${trip.status}`);
     console.log(`   Payment Collected: ${trip.paymentCollected}`);
     console.log(`   Final Fare: ₹${trip.finalFare}`);
+
+    // 💰 AWARD INCENTIVES TO DRIVER (NEW)
+    try {
+      const incentiveResult = await awardIncentivesToDriver(driverId, tripId);
+      if (incentiveResult.awarded) {
+        console.log(`🎉 Driver earned: ₹${incentiveResult.cash} + ${incentiveResult.coins} coins`);
+      }
+    } catch (incentiveError) {
+      // Log but don't fail the trip completion
+      console.error('⚠️ Failed to award incentives:', incentiveError);
+    }
 
     // ✅ SAVE TO RIDE HISTORY
     await saveToRideHistory(trip, 'Completed');

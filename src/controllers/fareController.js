@@ -1,19 +1,20 @@
-import asyncHandler from 'express-async-handler';
-import Rate from '../models/Rate.js';
-import { calcFare } from '../utils/fareCalc.js';
+import asyncHandler from "express-async-handler";
+import Rate from "../models/Rate.js";
+import { calcFare } from "../utils/fareCalc.js";
+import { getGoogleRouteDuration } from "../utils/getGoogleRouteDuration.js";
 
 /**
  * POST /api/fares/calc
- * Body → { state, city, vehicleType, category, distanceKm, … }
+ * Calculates smart, time-based, competitive fares using shared Google Maps data.
  */
 export const createFare = asyncHandler(async (req, res) => {
-console.log('[FARE REQ]', req.body);
-  /* --------- 1. Destructure request body --------- */
   const {
     state,
     city,
     vehicleType,
     category,
+    origin,
+    destination,
     distanceKm,
     durationMin,
     tripDays,
@@ -22,79 +23,112 @@ console.log('[FARE REQ]', req.body);
     weight,
   } = req.body;
 
-  /* --------- 2. Identify long‑trip --------- */
- const isLongTrip = category === 'long';
-
-
-  /* --------- 3. Build query (case‑insensitive state/city) --------- */
-  const query = {
-    state       : new RegExp(`^${state}$`, 'i'),
-    vehicleType : vehicleType,
-    category    : category,
-  };
-  if (!isLongTrip) {
-    query.city = new RegExp(`^${city}$`, 'i');
-  }
-
-  /* --------- 4. Fetch rate doc --------- */
-  const rate = await Rate.findOne(query);
-  if (!rate) {
-    return res.status(404).json({
+  const vType = vehicleType?.toLowerCase?.();
+  if (!state || !vType || !category) {
+    return res.status(400).json({
       ok: false,
-      message: 'Rate not found for that city, state, or vehicle',
+      message: "Missing required fields: state, vehicleType, or category",
     });
   }
 
-  /* ────────────────────────────────────────────────
-     🚲 PARCEL‑ONLY VALIDATION
-     • bike‑only for now
-     • weight ≤ maxWeightKg (default 10 kg)
-     • distance must be > 0
-     ──────────────────────────────────────────────── */
-  if (rate.category === 'parcel') {
-    // (A) Enforce bike vehicle
-    if (vehicleType !== 'bike') {
-      return res.status(400).json({
-        ok      : false,
-        message : 'Parcel delivery is currently supported only by bikes',
-      });
-    }
-
-    // (B) Weight guard
-    const maxKg = rate.maxWeightKg ?? 10;          // new schema field
-    const w     = Number(weight) || 0;
-    if (w > maxKg) {
-      return res.status(400).json({
-        ok      : false,
-        message : `Bike parcels cannot exceed ${maxKg} kg`,
-      });
-    }
-
-    // (C) Positive distance guard
-    if (!distanceKm || distanceKm <= 0) {
-      return res.status(400).json({
-        ok      : false,
-        message : 'distanceKm must be a positive number for parcel fare calculation',
-      });
+  /* ---------------------------------------------------------
+   * 1️⃣ Fetch shared route data (only once for all vehicles)
+   * --------------------------------------------------------- */
+  let sharedRoute = null;
+  if (origin && destination) {
+    try {
+      console.log("📡 Fetching Google route (shared for all vehicles)...");
+      sharedRoute = await getGoogleRouteDuration(origin, destination, "car"); // baseline mode
+      if (sharedRoute) {
+        console.log(
+          `✅ Google Route (car): ${sharedRoute.distanceKm.toFixed(2)} km | ${(sharedRoute.durationSec / 60).toFixed(1)} mins`
+        );
+      }
+    } catch (err) {
+      console.error("⚠️ Google Maps fetch failed:", err.message);
     }
   }
 
-  /* --------- 5. Calculate fare --------- */
+  // Use shared route for all vehicles
+  let liveDistanceKm = sharedRoute?.distanceKm || distanceKm;
+  let liveDurationMin = sharedRoute
+    ? sharedRoute.durationSec / 60
+    : durationMin || 15;
+
+  /* ---------------------------------------------------------
+   * 2️⃣ Fetch DB Rate
+   * --------------------------------------------------------- */
+  const query = {
+    state: new RegExp(`^${state}$`, "i"),
+    vehicleType: vType,
+    category,
+  };
+  if (category !== "long") query.city = new RegExp(`^${city}$`, "i");
+
+  const dbRate = await Rate.findOne(query);
+  if (dbRate)
+    console.log("📦 [DB RATE FOUND]", {
+      vehicleType: dbRate.vehicleType,
+      category: dbRate.category,
+      baseFare: dbRate.baseFare,
+      perKm: dbRate.perKm,
+    });
+  else console.warn("⚠️ No DB rate found — using internal defaults");
+
+  const rate = dbRate || { vehicleType: vType, category };
+
+  /* ---------------------------------------------------------
+   * 3️⃣ Apply per-vehicle travel time adjustment
+   * --------------------------------------------------------- */
+  const vehicleTimeFactor = {
+    bike: 0.8, // faster
+    auto: 0.9,
+    car: 1.0,
+    premium: 1.05,
+    xl: 1.1,
+  }[vType] || 1.0;
+
+  liveDurationMin *= vehicleTimeFactor;
+
+  const startTime = new Date().toISOString();
+  const dropTime = new Date(Date.now() + liveDurationMin * 60 * 1000).toISOString();
+
+  console.log("🟢 [FINAL FARE INPUT]", {
+    vehicleType: vType,
+    distanceKm: liveDistanceKm,
+    durationMin: liveDurationMin,
+    startTime,
+    dropTime,
+  });
+
+  /* ---------------------------------------------------------
+   * 4️⃣ Calculate fare
+   * --------------------------------------------------------- */
   let result;
   try {
     result = calcFare({
       rate,
-      distanceKm,
-      durationMin,
+      distanceKm: liveDistanceKm,
+      durationMin: liveDurationMin,
       tripDays,
       returnTrip,
       surge,
       weight,
+      startTime,
+      dropTime,
     });
   } catch (err) {
+    console.error("❌ Fare calculation error:", err);
     return res.status(400).json({ ok: false, message: err.message });
   }
 
-  /* --------- 6. Respond --------- */
-  res.json({ ok: true, rateId: rate._id, ...result });
+  /* ---------------------------------------------------------
+   * 5️⃣ Respond
+   * --------------------------------------------------------- */
+  res.json({
+    ok: true,
+    rateSource: dbRate ? "db" : "internal",
+    usedGoogleData: !!(origin && destination),
+    ...result,
+  });
 });

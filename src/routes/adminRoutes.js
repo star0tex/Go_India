@@ -26,20 +26,47 @@ import {
   sendPushToUsers,
   sendPushToIndividual,
 
-  // Notifications  // ✅ ADD THIS
+  // Notifications
   getUserNotifications,
   markNotificationAsRead,
   markAllNotificationsAsRead,
   deleteNotification,
-
+  
+  // Fare Rates
+  getAllFareRates,
+  updateFareRate,
+  createFareRate,
+  deleteFareRate,
+  
   // Documents
   getDriverDocuments,
   verifyDriverDocument,
   getPendingDocuments,
   getDocumentById,
+  
+  // 🧪 TEST - Add this import
+  testImageAccess,
 } from "../controllers/adminController.js";
 
 const router = express.Router();
+
+// =====================================================
+// 🧪 TEST ENDPOINTS (Add these at the top for easy access)
+// =====================================================
+// Without auth for quick testing:
+router.get("/test-images", testImageAccess);
+// Or with auth:
+// router.get("/test-images", verifyAdminToken, testImageAccess);
+
+// =====================================================
+// EXISTING ROUTES
+// =====================================================
+
+// Fare Rates
+router.get("/fare/rates", verifyAdminToken, getAllFareRates);
+router.put("/fare/update/:id", verifyAdminToken, updateFareRate);
+router.post("/fare/create", verifyAdminToken, createFareRate);
+router.delete("/fare/delete/:id", verifyAdminToken, deleteFareRate);
 
 // 🟡 Admin Login (Public)
 router.post("/login", adminLogin);
@@ -47,7 +74,7 @@ router.post("/login", adminLogin);
 // 🟢 Dashboard Stats
 router.get("/stats", verifyAdminToken, getDashboardStats);
 
-// 🧍 Customers
+// 🧑 Customers
 router.get("/customers", verifyAdminToken, getAllCustomers);
 router.put("/customer/block/:customerId", verifyAdminToken, blockCustomer);
 router.put("/customer/unblock/:customerId", verifyAdminToken, unblockCustomer);
@@ -68,7 +95,7 @@ router.put("/trip/:tripId/cancel", verifyAdminToken, cancelTrip);
 router.post("/send-fcm", verifyAdminToken, sendPushToUsers);
 router.post("/send-fcm/individual", verifyAdminToken, sendPushToIndividual);
 
-// 🔔 Notifications (NEW - ✅ ADD THESE 4 ROUTES)
+// 🔔 Notifications
 router.get("/notifications/user/:userId", getUserNotifications);
 router.put("/notifications/:notificationId/read", markNotificationAsRead);
 router.put("/notifications/user/:userId/read-all", markAllNotificationsAsRead);

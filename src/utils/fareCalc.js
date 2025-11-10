@@ -1,13 +1,9 @@
 /**
- * @param {Object}  p
- * @param {Object}  p.rate          – Mongoose doc fetched by the controller
- * @param {number}  p.distanceKm
- * @param {number}  [p.durationMin]
- * @param {number}  [p.tripDays=1]  – long trips only
- * @param {boolean} [p.returnTrip=true]
- * @param {number}  [p.surge=1]
- * @param {number}  [p.weight=0]    – for parcel only
+ * Go India Fare Calculation (Smart Competitive + DB-Aware + Time-Based + Night Surge v6)
+ * Fully synced with MongoDB rate schema.
+ * Automatically falls back to internal config if DB data missing.
  */
+
 export function calcFare({
   rate,
   distanceKm = 0,
@@ -16,165 +12,142 @@ export function calcFare({
   returnTrip = true,
   surge = 1,
   weight = 0,
+  competitorFare = null,
+  startTime = null,
+  dropTime = null,
 }) {
-  if (!rate) throw new Error('Rate doc missing');
+  if (!rate) throw new Error("Rate document missing.");
 
   const category = rate.category;
+  if (category !== "short") throw new Error(`Unsupported category: ${category}`);
 
-  /* ════════ PARCEL-DELIVERY ════════ */
-  if (category === 'parcel') {
-    const baseFare     = rate.baseFare     ?? 25;
-    const perKm        = rate.perKm        ?? 7;
-    const platformFee  = (() => {
-      if (distanceKm <= 3) return 5;
-      if (distanceKm <= 5) return 7;
-      if (distanceKm <= 10) return 10;
-      return 15;
-    })();
-    const maxWeightKg  = rate.maxWeightKg  ?? 10;
+  const vehicle = rate.vehicleType?.toLowerCase?.() || "bike";
+  const roundOff = (num) => Math.round(num / 5) * 5;
 
-    if (weight > maxWeightKg) {
-      throw new Error(`Parcel weight exceeds ${maxWeightKg} kg bike limit`);
+  // ✅ Internal fallback config
+  const internal = {
+    bike: { baseFare: 30, baseFareDistanceKm: 1, perKm: 10, minFare: 55, platformCommission: 0.10 },
+    auto: { baseFare: 45, baseFareDistanceKm: 2, perKm: 14, minFare: 70, platformCommission: 0.10 },
+    car: { baseFare: 70, baseFareDistanceKm: 2, perKm: 22, minFare: 90, platformCommission: 0.12 },
+    premium: { baseFare: 80, baseFareDistanceKm: 2, perKm: 24, minFare: 100, platformCommission: 0.12 },
+    xl: { baseFare: 95, baseFareDistanceKm: 2, perKm: 26, minFare: 120, platformCommission: 0.12 },
+  };
+
+  // ✅ Load from DB or fallback
+  const baseFare = rate.baseFare ?? internal[vehicle].baseFare;
+  const baseDistance = rate.baseFareDistanceKm ?? internal[vehicle].baseFareDistanceKm;
+  const perKm = rate.perKm ?? internal[vehicle].perKm;
+  const perMin = rate.perMin ?? 0;
+  const platformCommission = (rate.platformFeePercent ?? (internal[vehicle].platformCommission * 100)) / 100;
+  const gstPercent = rate.gstPercent ?? 0;
+  const minFare = rate.minFare ?? internal[vehicle].minFare;
+
+  // --- Platform Fee ---
+  // --- Platform Fee (Updated to 5 / 7 / 10 / 15) ---
+const platformFee =
+  distanceKm <= 3 ? 5 :       // 0–3 km  → ₹5
+  distanceKm <= 5 ? 7 :       // 3–5 km  → ₹7
+  distanceKm <= 10 ? 10 :     // 5–10 km → ₹10
+  15;                         // >10 km  → ₹15
+
+  // --- Base Fare Calculation ---
+  const chargeableDistance = Math.max(0, distanceKm - baseDistance);
+  let baseFareTotal =
+    baseFare + chargeableDistance * perKm + platformFee + durationMin * perMin;
+
+  // --- Surge Multiplier ---
+  const surgeMultiplier = rate.manualSurge ?? surge ?? 1;
+  baseFareTotal *= surgeMultiplier;
+
+  // --- Time Analysis ---
+  const hour = new Date(startTime || new Date()).getHours();
+  const peakHour = (hour >= 7 && hour < 10) || (hour >= 17 && hour < 21);
+  const nightHour = hour >= 22 || hour < 6;
+
+  // --- Duration per KM ---
+  let tripDuration = durationMin;
+  if (!tripDuration && startTime && dropTime) {
+    try {
+      const start = new Date(startTime);
+      const end = new Date(dropTime);
+      tripDuration = Math.max((end - start) / 60000, 1);
+    } catch {
+      tripDuration = durationMin || 0;
     }
-
-    const weightCharges = (() => {
-      const { baseKg = 0, baseCharge = 0, perExtraKg = 0 } = rate.weightRates ?? {};
-      const extraKg = Math.max(0, weight - baseKg);
-      return baseCharge + (extraKg * perExtraKg);
-    })();
-
-    const deliveryCharge = perKm * distanceKm;
-    let total = baseFare + deliveryCharge + weightCharges + platformFee;
-
-    total = Math.ceil(total / 5) * 5;
-
-    return {
-      type: 'parcel',
-      breakdown: {
-        baseFare,
-        deliveryCharge,
-        weightCharges,
-        platformFee,
-      },
-      total,
-    };
   }
+  const durationPerKm = tripDuration && distanceKm > 0 ? tripDuration / distanceKm : 0;
 
-  /* ═════════════════════════════════════════════════════
-     SHORT-TRIP  (bike / auto / car / premium / xl)
-     ════════════════════════════════════════════════════ */
-  else if (category === 'short') {
-    const vehicle = rate.vehicleType?.toLowerCase?.() || 'bike';
+  // --- Apply Peak Boost ---
+// --- Apply DB-Controlled Peak/Night Multipliers ---
+if (peakHour) {
+  const peakBoost = rate.peakMultiplier || 1.10;
+  baseFareTotal *= peakBoost;
+  console.log(`🚀 Applied peakMultiplier from DB: ${peakBoost}`);
+}
 
-    // ---- Base & distance tiers ----
-    const tiers = {
-      bike: {
-        baseFare: 20,
-        baseDistance: 1,
-        timeRate: 0.7,
-        perKm: (d) => (d <= 5 ? 6 : d <= 10 ? 7 : d <= 15 ? 8 : d <= 20 ? 9 : 10),
-        minFare: 45
-      },
-      auto: {
-        baseFare: 40,
-        baseDistance: 2,
-        timeRate: (d) => (d <= 10 ? 1.5 : 2),
-        perKm: () => 14,
-        minFare: 80
-      },
-      car: {
-        baseFare: 70,
-        baseDistance: 2,
-        timeRate: (d) => (d <= 10 ? 2.5 : 3),
-        perKm: () => 15,
-        minFare: 100
-      },
-      premium: {
-        baseFare: 100,
-        baseDistance: 2,
-        timeRate: (d) => (d <= 10 ? 4 : 5),
-        perKm: () => 19,
-        minFare: 130
-      },
-      xl: {
-        baseFare: 120,
-        baseDistance: 2,
-        timeRate: (d) => (d <= 10 ? 6 : 7),
-        perKm: () => 20,
-        minFare: 160
-      }
-    };
+if (nightHour) {
+  const nightBoost = rate.nightMultiplier || 1.33;
+  baseFareTotal *= nightBoost;
+  console.log(`🌙 Applied nightMultiplier from DB: ${nightBoost}`);
+}
 
-    const v = tiers[vehicle] ?? tiers.bike;
-    const chargeableDistance = Math.max(0, distanceKm - v.baseDistance);
 
-    // ---- Platform fee slab ----
-    const platformFee = (() => {
-      if (distanceKm <= 3) return 5;
-      if (distanceKm <= 5) return 7;
-      if (distanceKm <= 10) return 10;
-      return 15;
-    })();
+// --- Discount Logic ---
+let discountApplied = 0;
+let finalFare = baseFareTotal;
 
-    // ---- Effective weights for realistic fares ----
-    const distWeight = distanceKm < 5 ? 1.15 : 1.0;
-    const timeWeight = distanceKm < 5 ? 1.1 : 1.0;
+if (competitorFare) {
+  // Make it 10–15 ₹ cheaper regardless of distance
+  discountApplied = peakHour
+    ? Math.floor(Math.random() * 6) + 5   // ₹5–₹10 cheaper during peak
+    : Math.floor(Math.random() * 6) + 10; // ₹10–₹15 cheaper off-peak
 
-    const distanceFare = v.perKm(distanceKm) * chargeableDistance * distWeight;
-    const timeFare = (typeof v.timeRate === 'function' ? v.timeRate(distanceKm) : v.timeRate) * durationMin * timeWeight;
+  // If short distance (<3 km), add extra ₹5 discount to match ratio
+  if (distanceKm <= 3) discountApplied += 5;
 
-    let total = v.baseFare + distanceFare + timeFare + platformFee;
+  if (durationPerKm > 5) discountApplied = Math.max(discountApplied - 3, 5);
+  finalFare = competitorFare - discountApplied;
+} else {
+  // No competitorFare given — simulate similar 10–15 % cheaper pricing
+  const fallbackDiscount = Math.floor(Math.random() * 6) + 10;
+  const distanceBoost = distanceKm <= 3 ? 1.05 : 1.0; // add ~5 % more discount on short trips
+  finalFare = (baseFareTotal - fallbackDiscount) * 0.85 * distanceBoost;
+  discountApplied = fallbackDiscount;
+}
 
-    // ---- Apply minimum fare safeguard ----
-    total = Math.max(total, v.minFare);
+  // --- Add Rider-Friendly Flat Adjustment ---
+  finalFare += 20;
 
-    // ---- Apply surge if any ----
-    total *= surge;
+  // --- GST, Platform & Rounding ---
+  const gstAmount = (finalFare * gstPercent) / 100;
+  const platformCut = finalFare * platformCommission;
+  const total = Math.max(roundOff(finalFare + gstAmount), minFare);
+  const driverGets = total - platformCut;
 
-    // ---- Round to nearest ₹5 ----
-    total = Math.round(total / 5) * 5;
+  console.log(
+    `🕒 Hour: ${hour} | ${peakHour ? "🚀 Peak" : nightHour ? "🌙 Night" : "☀️ Off"} | ${distanceKm} km | ${vehicle} | ₹${total}`
+  );
 
-    return {
-      type: 'short',
-      breakdown: { baseFare: v.baseFare, distanceFare, timeFare, platformFee },
-      total
-    };
-  }
-
-  /* ════════════════════════════════════════════════════
-     LONG-TRIP  (car / premium / xl)
-     ════════════════════════════════════════════════════ */
-  else if (category === 'long') {
-    const vehicleType = rate.vehicleType;
-    const driverFees = {
-      car:     { firstDay: 1500, extraDay: 900 },
-      premium: { firstDay: 1800, extraDay: 1000 },
-      xl:      { firstDay: 2000, extraDay: 1100 }
-    };
-
-    const feeSet = driverFees[vehicleType];
-    if (!feeSet) throw new Error(`Missing driver fee config for vehicle type: ${vehicleType}`);
-
-    const fuelOneWay = distanceKm * rate.fuelPerKm;
-    const fuel = returnTrip ? fuelOneWay * 2 : fuelOneWay;
-
-    let driverFee = 0;
-    if (returnTrip) {
-      driverFee = feeSet.firstDay + (tripDays - 1) * feeSet.extraDay;
-    } else {
-      driverFee = (feeSet.firstDay / 2) + fuelOneWay; // driver returns solo
-    }
-
-    const total = Math.round(driverFee + fuel);
-
-    return {
-      type: 'long',
-      breakdown: { fuel, driverFee },
-      total
-    };
-  }
-
-  else {
-    throw new Error(`Unknown category: ${category}`);
-  }
+  return {
+    success: true,
+    type: "short",
+    vehicleType: vehicle,
+    total,
+    remarks: `Calculated (${peakHour ? "Peak" : nightHour ? "Night" : "Off-Peak"}) — includes dynamic multipliers.`,
+    breakdown: {
+      baseFare,
+      perKm,
+      perMin,
+      platformFee,
+      surgeMultiplier,
+      tripDuration: `${Math.round(tripDuration)} mins`,
+      peakHour,
+      nightHour,
+      discountApplied,
+      platformCommissionPercent: platformCommission * 100,
+      gstAmount: roundOff(gstAmount),
+      platformEarning: roundOff(platformCut),
+      driverEarning: roundOff(driverGets),
+    },
+  };
 }

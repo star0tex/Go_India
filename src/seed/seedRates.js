@@ -13,24 +13,28 @@ await connectDB();
 /* ------------------ 3. Define tariff cards --------------- */
 /**
  * One object = one document in the Rate collection.
- * Hyderabad for short and parcel. Long‑trip rates apply to entire Telangana.
+ * Hyderabad for short and parcel. Long-trip rates apply to entire Telangana.
  */
 const rates = [
   /* ────────────── Hyderabad, Telangana ────────────── */
 
-  // Short‑trip: Bike, Auto, Prime, Car, XL
+  // ───── SHORT-TRIP: Go India Fare Table ─────
   {
     state: 'telangana',
     city: 'hyderabad',
     vehicleType: 'bike',
     category: 'short',
-    baseFareDistanceKm: 2,
-    baseFare: 25,
-    perKm: 6,
-    perMin: 1,
-    minFare: 25,
-    platformFeePercent: 3,
+    baseFareDistanceKm: 1,
+    baseFare: 20,
+    perKm: 16.67,
+    perMin: 0.7,
+    minFare: 65,
+    platformFeePercent: 10,
     gstPercent: 5,
+    nightMultiplier: 1.33,   // 33% increase for all vehicles (you can adjust)
+peakMultiplier: 1.15,    // 15% increase during peak
+manualSurge: 1.0,        // default
+
   },
   {
     state: 'telangana',
@@ -38,12 +42,16 @@ const rates = [
     vehicleType: 'auto',
     category: 'short',
     baseFareDistanceKm: 2,
-    baseFare: 30,
-    perKm: 8,
-    perMin: 1,
-    minFare: 35,
-    platformFeePercent: 3,
+    baseFare: 40,
+    perKm: 19.5,
+    perMin: 1.5,
+    minFare: 75,
+    platformFeePercent: 12,
     gstPercent: 5,
+    nightMultiplier: 1.33,   // 33% increase for all vehicles (you can adjust)
+peakMultiplier: 1.15,    // 15% increase during peak
+manualSurge: 1.0,        // default
+
   },
   {
     state: 'telangana',
@@ -51,12 +59,16 @@ const rates = [
     vehicleType: 'car',
     category: 'short',
     baseFareDistanceKm: 2,
-    baseFare: 45,
-    perKm: 12,
-    perMin: 2,
-    minFare: 50,
-    platformFeePercent: 5,
+    baseFare: 60,
+    perKm: 23.5,
+    perMin: 2.5,
+    minFare: 90,
+    platformFeePercent: 15,
     gstPercent: 5,
+    nightMultiplier: 1.33,   // 33% increase for all vehicles (you can adjust)
+peakMultiplier: 1.15,    // 15% increase during peak
+manualSurge: 1.0,        // default
+
   },
   {
     state: 'telangana',
@@ -64,12 +76,16 @@ const rates = [
     vehicleType: 'premium',
     category: 'short',
     baseFareDistanceKm: 2,
-    baseFare: 50,
-    perKm: 14,
-    perMin: 2,
-    minFare: 60,
-    platformFeePercent: 5,
+    baseFare: 80,
+    perKm: 25,
+    perMin: 3,
+    minFare: 100,
+    platformFeePercent: 15,
     gstPercent: 5,
+    nightMultiplier: 1.33,   // 33% increase for all vehicles (you can adjust)
+peakMultiplier: 1.15,    // 15% increase during peak
+manualSurge: 1.0,        // default
+
   },
   {
     state: 'telangana',
@@ -77,15 +93,19 @@ const rates = [
     vehicleType: 'xl',
     category: 'short',
     baseFareDistanceKm: 2,
-    baseFare: 60,
-    perKm: 16,
-    perMin: 3,
-    minFare: 70,
-    platformFeePercent: 5,
+    baseFare: 100,
+    perKm: 28,
+    perMin: 4,
+    minFare: 120,
+    platformFeePercent: 15,
     gstPercent: 5,
+    nightMultiplier: 1.33,   // 33% increase for all vehicles (you can adjust)
+peakMultiplier: 1.15,    // 15% increase during peak
+manualSurge: 1.0,        // default
+
   },
 
-  // Long‑trip: Intercity (same state) — applies to full state (city not needed)
+  // ───── LONG-TRIP: Intercity (Telangana-wide) ─────
   {
     state: 'telangana',
     vehicleType: 'car',
@@ -114,36 +134,31 @@ const rates = [
     halfDayReturnFee: 900,
   },
 
-  // Parcel Delivery  (🚲 Bike only)
+  // ───── PARCEL DELIVERY (Bike only) ─────
   {
     state: 'telangana',
     city: 'hyderabad',
     vehicleType: 'bike',
     category: 'parcel',
-
-    /* ––––– Fare inputs for calcFare(parcel) ––––– */
-    baseFare    : 25,   // fixed pickup / wait cost
-    perKm       : 7,    // distance component
-    platformFee : 15,   // flat margin / handling
-    maxWeightKg : 10,   // bike limit
-
-    /* Optional per‑kg surcharges */
+    baseFare: 25,          // fixed pickup cost
+    perKm: 7,              // distance charge
+    platformFee: 15,       // flat handling fee
+    maxWeightKg: 10,       // weight cap
     weightRates: {
-      baseKg     : 5,   // first 5 kg covered in base
-      baseCharge : 40,  // charge applied if weight > baseKg
-      perExtraKg : 5    // ₹/kg beyond baseKg
-    }
+      baseKg: 5,
+      baseCharge: 40,
+      perExtraKg: 5,
+    },
   },
 ];
 
 /* ------------------ 4. Seed the collection --------------- */
-console.log('⏳  Clearing existing rates for Telangana…');
+console.log('⏳ Clearing existing rates for Telangana…');
 await Rate.deleteMany({ state: 'telangana' }); // remove old Telangana rates
 
-console.log(`⏳  Inserting ${rates.length} tariff cards…`);
+console.log(`⏳ Inserting ${rates.length} updated tariff cards…`);
 await Rate.insertMany(rates);
 
-console.log('✅  Seed complete!');
-
+console.log('✅ Go India rates seeded successfully!');
 await mongoose.disconnect();
 process.exit(0);

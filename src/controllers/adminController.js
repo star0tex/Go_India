@@ -1,14 +1,86 @@
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
+import mongoose from "mongoose";
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
 import Trip from "../models/Trip.js";
 import User from "../models/User.js";
+import Rate from "../models/Rate.js";
 import DriverDoc from "../models/DriverDoc.js";
-import Notification from "../models/Notification.js";  // ✅ ADD THIS
+import Notification from "../models/Notification.js";
 import { sendToDriver, sendToCustomer } from "../utils/fcmSender.js";
 import { verifyAdminToken } from "../middlewares/adminAuth.js";
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
+dotenv.config();
+export const getAllFareRates = async (req, res) => {
+  try {
+    const rates = await Rate.find({}).sort({ state: 1, city: 1, vehicleType: 1 });
+    res.status(200).json({ message: "Fare rates fetched successfully", rates });
+  } catch (err) {
+    console.error("❌ Error fetching fare rates:", err);
+    res.status(500).json({ message: "Server error while fetching fare rates." });
+  }
+};
+
+/**
+ * ✏️ Update a specific fare rate
+ * PUT /api/admin/fare/update/:id
+ */
+export const updateFareRate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    // Optional validation for safety
+    if (updates.baseFare < 0 || updates.perKm < 0) {
+      return res.status(400).json({ message: "Invalid fare values." });
+    }
+
+    const rate = await Rate.findByIdAndUpdate(id, updates, { new: true, runValidators: true });
+    if (!rate) return res.status(404).json({ message: "Rate not found." });
+
+    res.status(200).json({ message: "Fare rate updated successfully", rate });
+  } catch (err) {
+    console.error("❌ Error updating fare rate:", err);
+    res.status(500).json({ message: "Server error while updating fare rate." });
+  }
+};
+
+/**
+ * ➕ Add new rate (for new city/vehicle)
+ * POST /api/admin/fare/create
+ */
+export const createFareRate = async (req, res) => {
+  try {
+    const rate = await Rate.create(req.body);
+    res.status(201).json({ message: "New fare rate added successfully", rate });
+  } catch (err) {
+    console.error("❌ Error creating new fare rate:", err);
+    res.status(500).json({ message: "Server error while creating rate." });
+  }
+};
+
+/**
+ * ❌ Delete fare rate
+ * DELETE /api/admin/fare/delete/:id
+ */
+export const deleteFareRate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const rate = await Rate.findByIdAndDelete(id);
+    if (!rate) return res.status(404).json({ message: "Rate not found." });
+
+    res.status(200).json({ message: "Fare rate deleted successfully" });
+  } catch (err) {
+    console.error("❌ Error deleting fare rate:", err);
+    res.status(500).json({ message: "Server error while deleting fare rate." });
+  }
+};
 // ======================================================================
 // 📊 Dashboard Stats
 // ======================================================================
@@ -391,27 +463,198 @@ export const deleteNotification = async (req, res) => {
 // ======================================================================
 export const getPendingDocuments = async (req, res) => {
   try {
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+
     const documents = await DriverDoc.find({ status: "pending" })
-      .populate("userId", "name")
+      .populate("userId", "name email")
       .sort({ createdAt: 1 });
-    res.status(200).json({ message: "Pending documents fetched successfully.", documents });
+
+    // Add full public image URL for frontend
+    const docsWithImageUrl = documents.map((doc) => {
+      const rawPath = doc.url?.replace(/\\/g, "/") || null; // normalize Windows slashes
+      const fullUrl = rawPath ? `${baseUrl}/${rawPath}` : null;
+
+      return {
+        ...doc.toObject(),
+        imageUrl: fullUrl,
+      };
+    });
+
+    res.status(200).json({
+      message: "Pending documents fetched successfully.",
+      documents: docsWithImageUrl,
+    });
   } catch (err) {
     console.error("❌ Error fetching pending documents:", err);
     res.status(500).json({ message: "Server error." });
   }
 };
 
+// =====================================================
+// 🧪 TEST ENDPOINT - Add this function
+// =====================================================
+export const testImageAccess = async (req, res) => {
+  try {
+    const uploadsDir = path.join(process.cwd(), 'uploads');
+    
+    console.log('🧪 Testing image access...');
+    console.log('📁 Uploads directory:', uploadsDir);
+    
+    // Check if uploads directory exists
+    if (!fs.existsSync(uploadsDir)) {
+      return res.status(404).json({
+        error: 'Uploads directory does not exist',
+        path: uploadsDir,
+        cwd: process.cwd()
+      });
+    }
+    
+    // List all files in uploads directory
+    const files = fs.readdirSync(uploadsDir);
+    
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    
+    const fileDetails = files.map(file => {
+      const filePath = path.join(uploadsDir, file);
+      const stats = fs.statSync(filePath);
+      
+      return {
+        filename: file,
+        relativePath: `uploads/${file}`,
+        fullPath: filePath,
+        url: `${baseUrl}/uploads/${file}`,
+        size: stats.size,
+        sizeKB: Math.round(stats.size / 1024),
+        created: stats.birthtime,
+        modified: stats.mtime
+      };
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: 'Upload directory accessible',
+      uploadsDir,
+      baseUrl,
+      totalFiles: files.length,
+      files: fileDetails
+    });
+  } catch (err) {
+    console.error('❌ Test endpoint error:', err);
+    res.status(500).json({
+      error: 'Error accessing uploads directory',
+      message: err.message,
+      stack: err.stack
+    });
+  }
+};
+
+// Fixed getDriverDocuments in adminController.js
 export const getDriverDocuments = async (req, res) => {
   try {
     const { driverId } = req.params;
-    const documents = await DriverDoc.find({ userId: driverId });
-    if (!documents || documents.length === 0)
-      return res.status(404).json({ message: "No documents found for this driver." });
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
 
-    res.status(200).json({ message: "Documents retrieved successfully.", documents });
+    console.log(`\n📋 Fetching documents for driver: ${driverId}`);
+    console.log(`🌐 Base URL: ${baseUrl}`);
+    
+    const documents = await DriverDoc.find({ userId: driverId }).lean();
+    
+    console.log(`📄 Found ${documents.length} documents in database`);
+
+    const docsWithImageUrl = documents.map((doc, index) => {
+      console.log(`\n  Document ${index + 1}/${documents.length}:`);
+      console.log(`    ID: ${doc._id}`);
+      console.log(`    Type: ${doc.docType}`);
+      
+      let imageUrl = null;
+      let fileExists = false;
+      let debugInfo = {};
+      
+      if (doc.url) {
+        // Original path from database
+        const originalPath = doc.url;
+        console.log(`    Original DB path: ${originalPath}`);
+        
+        // Normalize path: convert backslashes to forward slashes
+        let cleanPath = originalPath.replace(/\\/g, "/");
+        console.log(`    After normalize: ${cleanPath}`);
+        
+        // Extract path starting from 'uploads/'
+        const uploadsIndex = cleanPath.indexOf('uploads/');
+        if (uploadsIndex !== -1) {
+          cleanPath = cleanPath.substring(uploadsIndex);
+          console.log(`    After extract: ${cleanPath}`);
+        } else if (!cleanPath.startsWith('uploads/')) {
+          // If path doesn't contain 'uploads/', try to construct it
+          const filename = path.basename(cleanPath);
+          cleanPath = `uploads/${filename}`;
+          console.log(`    Reconstructed: ${cleanPath}`);
+        }
+        
+        // Check if file exists on disk
+        const fullFilePath = path.join(process.cwd(), cleanPath);
+        fileExists = fs.existsSync(fullFilePath);
+        console.log(`    File exists: ${fileExists}`);
+        console.log(`    Full path: ${fullFilePath}`);
+        
+        // Construct URL
+        imageUrl = `${baseUrl}/${cleanPath}`;
+        console.log(`    Final URL: ${imageUrl}`);
+        
+        debugInfo = {
+          originalPath,
+          cleanPath,
+          fullFilePath,
+          fileExists,
+          fileSize: fileExists ? fs.statSync(fullFilePath).size : null
+        };
+        
+        return {
+          ...doc,
+          imageUrl,
+          url: cleanPath,
+          _debug: debugInfo
+        };
+      }
+      
+      console.log(`    ⚠️ No URL found in database`);
+      
+      return {
+        ...doc,
+        imageUrl: null,
+        url: null,
+        _debug: {
+          error: 'No URL in document record'
+        }
+      };
+    });
+
+    const uploadsDir = path.join(process.cwd(), 'uploads');
+    const uploadsDirExists = fs.existsSync(uploadsDir);
+    
+    console.log(`\n✅ Response prepared:`);
+    console.log(`   Documents with images: ${docsWithImageUrl.filter(d => d.imageUrl).length}`);
+    console.log(`   Files exist on disk: ${docsWithImageUrl.filter(d => d._debug?.fileExists).length}`);
+
+    res.status(200).json({
+      message: "Documents retrieved successfully.",
+      docs: docsWithImageUrl,
+      _debug: {
+        baseUrl,
+        uploadsDirExists,
+        uploadsDir,
+        totalDocs: documents.length,
+        docsWithUrls: docsWithImageUrl.filter(d => d.imageUrl).length,
+        filesExist: docsWithImageUrl.filter(d => d._debug?.fileExists).length
+      }
+    });
   } catch (err) {
     console.error("❌ Error fetching driver documents:", err);
-    res.status(500).json({ message: "Server error while fetching documents." });
+    res.status(500).json({ 
+      message: "Server error",
+      error: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
   }
 };
 
@@ -433,8 +676,8 @@ export const verifyDriverDocument = async (req, res) => {
     const { docId } = req.params;
     const { status, remarks } = req.body;
 
-    if (!["verified", "rejected"].includes(status)) {
-      return res.status(400).json({ message: "Invalid status. Must be 'verified' or 'rejected'." });
+    if (!["approved", "rejected", "verified"].includes(status)) {
+      return res.status(400).json({ message: "Invalid status. Must be 'approved' or 'rejected'." });
     }
 
     const updatedDoc = await DriverDoc.findByIdAndUpdate(
@@ -450,7 +693,6 @@ export const verifyDriverDocument = async (req, res) => {
     res.status(500).json({ message: "Server error while verifying document." });
   }
 };
-
 // ======================================================================
 // 🔐 Admin Login
 // ======================================================================

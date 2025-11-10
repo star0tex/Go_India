@@ -1,16 +1,16 @@
 import express from "express";
 import { uploadDriverProfilePhoto } from "../controllers/driverProfileController.js";
-import { 
-  uploadDriverDocument, 
-  getDriverDocuments, 
-  getDriverById, 
-  getDriverProfile 
+import {
+  uploadDriverDocument,
+  getDriverDocuments,
+  getDriverById,
+  getDriverProfile
 } from "../controllers/documentController.js";
 import { protect } from "../middlewares/authMiddleware.js";
 import { uploadDocument, uploadProfilePhoto } from "../middlewares/multer.js";
-import { 
+import {
   updateDriverVehicleType,
-  updateDriverProfile // ✅ NEW IMPORT
+  updateDriverProfile
 } from "../controllers/driverController.js";
 import User from "../models/User.js";
 
@@ -28,7 +28,7 @@ router.get("/nearby", protect, async (req, res) => {
     if (!lat || !lng) {
       return res.status(400).json({
         success: false,
-        message: 'Latitude and longitude are required',
+        message: "Latitude and longitude are required",
       });
     }
 
@@ -39,14 +39,14 @@ router.get("/nearby", protect, async (req, res) => {
     if (isNaN(latitude) || isNaN(longitude) || isNaN(radiusKm)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid coordinate or radius values',
+        message: "Invalid coordinate or radius values",
       });
     }
 
     if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
       return res.status(400).json({
         success: false,
-        message: 'Coordinates out of valid range',
+        message: "Coordinates out of valid range",
       });
     }
 
@@ -58,47 +58,47 @@ router.get("/nearby", protect, async (req, res) => {
       location: {
         $near: {
           $geometry: {
-            type: 'Point',
+            type: "Point",
             coordinates: [longitude, latitude],
           },
           $maxDistance: radiusKm * 1000,
         },
       },
     })
-    .select('name phone vehicleType location rating vehicleBrand vehicleNumber')
-    .limit(50)
-    .lean();
+      .select("name phone vehicleType location rating vehicleBrand vehicleNumber")
+      .limit(50)
+      .lean();
 
     console.log(`✅ Found ${drivers.length} nearby drivers`);
 
-    const formattedDrivers = drivers.map(driver => ({
+    const formattedDrivers = drivers.map((driver) => ({
       id: driver._id.toString(),
-      name: driver.name || 'Driver',
-      phone: driver.phone || '',
-      vehicleType: driver.vehicleType || 'bike',
+      name: driver.name || "Driver",
+      phone: driver.phone || "",
+      vehicleType: driver.vehicleType || "bike",
       lat: driver.location.coordinates[1],
       lng: driver.location.coordinates[0],
       rating: driver.rating || 4.5,
-      vehicleBrand: driver.vehicleBrand || '',
-      vehicleNumber: driver.vehicleNumber || '',
+      vehicleBrand: driver.vehicleBrand || "",
+      vehicleNumber: driver.vehicleNumber || "",
     }));
 
     return res.status(200).json(formattedDrivers);
-
   } catch (error) {
-    console.error('❌ Error in /api/driver/nearby:', error);
-    
-    if (error.name === 'MongoError' && error.code === 27) {
+    console.error("❌ Error in /api/driver/nearby:", error);
+
+    if (error.name === "MongoError" && error.code === 27) {
       return res.status(500).json({
         success: false,
-        message: 'Geospatial index not found. Please ensure location field has a 2dsphere index.',
+        message:
+          "Geospatial index not found. Please ensure location field has a 2dsphere index.",
         error: error.message,
       });
     }
 
     return res.status(500).json({
       success: false,
-      message: 'Failed to fetch nearby drivers',
+      message: "Failed to fetch nearby drivers",
       error: error.message,
     });
   }
@@ -108,7 +108,6 @@ router.get("/nearby", protect, async (req, res) => {
  * @route   GET /api/driver/profile
  * @desc    Get authenticated driver's own profile
  * @access  Protected
- * 🔥 IMPORTANT: This route MUST come before /:driverId to avoid conflicts
  */
 router.get("/profile", protect, getDriverProfile);
 
@@ -120,7 +119,6 @@ router.get("/profile", protect, getDriverProfile);
 router.post("/setVehicleType", protect, updateDriverVehicleType);
 
 /**
- * ✅ NEW ROUTE
  * @route   POST /api/driver/updateProfile
  * @desc    Update driver profile (name, vehicle number, vehicle type)
  * @access  Protected
@@ -131,7 +129,6 @@ router.post("/updateProfile", protect, updateDriverProfile);
  * @route   GET /api/driver/documents/:driverId
  * @desc    Get driver documents by driver ID
  * @access  Protected
- * 🔥 IMPORTANT: This route MUST come before /:driverId to avoid conflicts
  */
 router.get("/documents/:driverId", protect, getDriverDocuments);
 
@@ -163,7 +160,6 @@ router.post(
  * @route   GET /api/driver/:driverId
  * @desc    Get driver details by ID
  * @access  Protected
- * 🔥 IMPORTANT: This route should come LAST among GET routes to avoid capturing other paths
  */
 router.get("/:driverId", protect, getDriverById);
 
