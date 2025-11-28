@@ -4,7 +4,8 @@ import {
   uploadDriverDocument,
   getDriverDocuments,
   getDriverById,
-  getDriverProfile
+  getDriverProfile,
+  resendDriverDocument
 } from "../controllers/documentController.js";
 import { protect } from "../middlewares/authMiddleware.js";
 import { uploadDocument, uploadProfilePhoto } from "../middlewares/multer.js";
@@ -13,6 +14,8 @@ import {
   updateDriverProfile
 } from "../controllers/driverController.js";
 import User from "../models/User.js";
+
+//import { firebaseAuth } from "../middlewares/authMiddleware.js"; // whatever middleware you use
 
 const router = express.Router();
 
@@ -162,5 +165,7 @@ router.post(
  * @access  Protected
  */
 router.get("/:driverId", protect, getDriverById);
+// Correct path so it is relative to the router mountpoint (e.g. /api/driver)
+router.put("/documents/:docId/resend", protect, resendDriverDocument);
 
 export default router;

@@ -43,6 +43,7 @@ import {
   verifyDriverDocument,
   getPendingDocuments,
   getDocumentById,
+  deleteDriverDocumentImage,
   
   // 🧪 TEST - Add this import
   testImageAccess,
@@ -106,5 +107,6 @@ router.get("/documents/pending", verifyAdminToken, getPendingDocuments);
 router.get("/documents/:driverId", verifyAdminToken, getDriverDocuments);
 router.get("/document/:docId", verifyAdminToken, getDocumentById);
 router.put("/verifyDocument/:docId", verifyAdminToken, verifyDriverDocument);
+router.delete("/document/:docId/image", verifyAdminToken, deleteDriverDocumentImage);
 
 export default router;

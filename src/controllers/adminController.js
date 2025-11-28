@@ -131,13 +131,50 @@ export const getDashboardStats = async (req, res) => {
 // ======================================================================
 export const getAllDrivers = async (req, res) => {
   try {
-    const drivers = await User.find({ isDriver: true }).select("-password");
-    res.status(200).json({ message: "Drivers fetched successfully", drivers });
+    const drivers = await User.find({ isDriver: true })
+      .select(
+        "name email phone vehicleType profilePhotoUrl photo profilePic driverPhoto avatar isBlocked"
+      );
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+    const formattedDrivers = drivers.map((d) => {
+      const rawPhoto =
+        d.profilePhotoUrl ||
+        d.photo ||
+        d.profilePic ||
+        d.driverPhoto ||
+        d.avatar ||
+        null;
+
+      let finalPhotoUrl = null;
+
+      if (rawPhoto) {
+        if (rawPhoto.startsWith("http")) {
+          finalPhotoUrl = rawPhoto;
+        } else {
+          finalPhotoUrl = `${baseUrl}/${rawPhoto.replace(/\\/g, "/")}`;
+        }
+      }
+
+      return {
+        _id: d._id,
+        name: d.name,
+        email: d.email,
+        phone: d.phone,
+        vehicleType: d.vehicleType,
+        profilePhotoUrl: finalPhotoUrl,
+        isBlocked: d.isBlocked,
+      };
+    });
+
+    res.status(200).json({ drivers: formattedDrivers });
   } catch (err) {
-    console.error("❌ Error fetching drivers:", err);
-    res.status(500).json({ message: "Server error while fetching drivers." });
+    console.log(err);
+    res.status(500).json({ message: "Server error" });
   }
 };
+
 
 export const getAllCustomers = async (req, res) => {
   try {
@@ -674,17 +711,15 @@ export const getDocumentById = async (req, res) => {
 export const verifyDriverDocument = async (req, res) => {
   try {
     const { docId } = req.params;
-    const { status, remarks } = req.body;
+    const { status, remarks, extractedData } = req.body;
 
-    if (!["approved", "rejected", "verified"].includes(status)) {
-      return res.status(400).json({ message: "Invalid status. Must be 'approved' or 'rejected'." });
-    }
+    if (!["approved", "rejected", "verified"].includes(status))
+      return res.status(400).json({ message: "Invalid status." });
 
-    const updatedDoc = await DriverDoc.findByIdAndUpdate(
-      docId,
-      { status, remarks },
-      { new: true }
-    );
+    const updates = { status, remarks };
+    if (extractedData && typeof extractedData === "object") updates.extractedData = extractedData;
+
+    const updatedDoc = await DriverDoc.findByIdAndUpdate(docId, updates, { new: true });
     if (!updatedDoc) return res.status(404).json({ message: "Document not found." });
 
     res.status(200).json({ message: `Document ${status} successfully.`, document: updatedDoc });
@@ -693,6 +728,38 @@ export const verifyDriverDocument = async (req, res) => {
     res.status(500).json({ message: "Server error while verifying document." });
   }
 };
+
+// 🆕 Delete document image to free backend space
+export const deleteDriverDocumentImage = async (req, res) => {
+  try {
+    const { docId } = req.params;
+    const doc = await DriverDoc.findById(docId);
+    if (!doc) return res.status(404).json({ message: "Document not found." });
+    if (!doc.url) return res.status(400).json({ message: "No image stored for this document." });
+
+    let filePath = doc.url.replace(/\\/g, "/");
+    const uploadsIndex = filePath.indexOf("uploads/");
+    if (uploadsIndex !== -1)
+      filePath = path.join(process.cwd(), filePath.substring(uploadsIndex));
+    else filePath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
+
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      console.log(`🗑️ Deleted file: ${filePath}`);
+    } else console.warn(`⚠️ File not found: ${filePath}`);
+
+    doc.url = null;
+    doc.imageDeleted = true;
+    doc.imageDeletedAt = new Date();
+    await doc.save();
+
+    res.status(200).json({ message: "Document image deleted and DB updated.", doc });
+  } catch (err) {
+    console.error("❌ Error deleting document image:", err);
+    res.status(500).json({ message: "Server error while deleting document image.", error: err.message });
+  }
+};
+
 // ======================================================================
 // 🔐 Admin Login
 // ======================================================================
