@@ -11,15 +11,22 @@ const __dirname = path.dirname(__filename);
 
 console.log("📄 documentController loaded");
 
+<<<<<<< HEAD
 // ======================================================================
 // 🔧 Helper: Recompute Driver Document Status
 // ======================================================================
 
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 /**
  * ✅ Helper: recompute user's overall documentStatus + isVerified
  * based on all DriverDoc records for their vehicleType.
  */
+<<<<<<< HEAD
 export const recomputeDriverDocumentStatus = async (userId) => {
+=======
+const recomputeDriverDocumentStatus = async (userId) => {
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
   try {
     const driver = await User.findById(userId).lean();
     if (!driver) {
@@ -36,6 +43,10 @@ export const recomputeDriverDocumentStatus = async (userId) => {
       return;
     }
 
+<<<<<<< HEAD
+=======
+    // requiredDocs is config from ../utils/requiredDocs.js
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     const requiredForVehicle = (requiredDocs[vehicleType] || []).map((d) =>
       d.toString().toLowerCase()
     );
@@ -47,6 +58,10 @@ export const recomputeDriverDocumentStatus = async (userId) => {
       return;
     }
 
+<<<<<<< HEAD
+=======
+    // Fetch all docs for this user & vehicleType that are not deleted
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     const docs = await DriverDoc.find({
       userId: userId.toString(),
       vehicleType: vehicleType,
@@ -54,6 +69,10 @@ export const recomputeDriverDocumentStatus = async (userId) => {
     }).lean();
 
     if (!docs.length) {
+<<<<<<< HEAD
+=======
+      // No docs uploaded → definitely pending
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
       await User.findByIdAndUpdate(userId, {
         documentStatus: "pending",
         isVerified: false,
@@ -61,7 +80,12 @@ export const recomputeDriverDocumentStatus = async (userId) => {
       return;
     }
 
+<<<<<<< HEAD
     const docsByType = new Map();
+=======
+    // Group docs by docType
+    const docsByType = new Map(); // docType -> [docs]
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     for (const d of docs) {
       const type = (d.docType || "").toString().toLowerCase();
       if (!type) continue;
@@ -74,10 +98,15 @@ export const recomputeDriverDocumentStatus = async (userId) => {
     let anyRejected = false;
     let anyPending = false;
 
+<<<<<<< HEAD
+=======
+    // Evaluate status per required doc type
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     for (const docType of requiredForVehicle) {
       const list = docsByType.get(docType) || [];
 
       if (!list.length) {
+<<<<<<< HEAD
         allRequiredUploaded = false;
         allApproved = false;
         anyPending = true;
@@ -85,6 +114,16 @@ export const recomputeDriverDocumentStatus = async (userId) => {
       }
 
       let typeStatus = "approved";
+=======
+        // missing required doc
+        allRequiredUploaded = false;
+        allApproved = false;
+        anyPending = true; // treat as pending
+        continue;
+      }
+
+      let typeStatus = "approved"; // optimistic
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 
       for (const d of list) {
         const s = (d.status || "pending").toString().toLowerCase();
@@ -99,8 +138,14 @@ export const recomputeDriverDocumentStatus = async (userId) => {
           anyPending = true;
           allApproved = false;
         } else if (s === "verified" || s === "approved") {
+<<<<<<< HEAD
           // ok
         } else {
+=======
+          // ok, keep optimistic
+        } else {
+          // unknown → treat as pending
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
           typeStatus = "pending";
           anyPending = true;
           allApproved = false;
@@ -135,10 +180,13 @@ export const recomputeDriverDocumentStatus = async (userId) => {
   }
 };
 
+<<<<<<< HEAD
 // ======================================================================
 // 👤 Driver Profile
 // ======================================================================
 
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 /**
  * @desc    Get authenticated driver's profile
  * @route   GET /api/driver/profile
@@ -146,6 +194,7 @@ export const recomputeDriverDocumentStatus = async (userId) => {
  */
 export const getDriverProfile = async (req, res) => {
   try {
+<<<<<<< HEAD
     console.log("");
     console.log("=".repeat(70));
     console.log("👤 GET DRIVER PROFILE REQUEST");
@@ -154,6 +203,9 @@ export const getDriverProfile = async (req, res) => {
     console.log("=".repeat(70));
 
     // req.user is populated by your Firebase auth middleware
+=======
+    // Support middleware that sets either id or uid
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     const userId = (req.user && (req.user.id || req.user.uid)) || null;
 
     if (!userId) {
@@ -163,6 +215,7 @@ export const getDriverProfile = async (req, res) => {
       return res.status(401).json({ message: "User not authenticated" });
     }
 
+<<<<<<< HEAD
     // ✅ Ensure documentStatus is always fresh
     try {
       await recomputeDriverDocumentStatus(userId.toString());
@@ -171,6 +224,8 @@ export const getDriverProfile = async (req, res) => {
     }
 
     // Find user by MongoDB _id
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     const driver = await User.findById(userId).lean();
 
     if (!driver) {
@@ -180,6 +235,7 @@ export const getDriverProfile = async (req, res) => {
       return res.status(404).json({ message: "Driver not found" });
     }
 
+<<<<<<< HEAD
     console.log(`   ✅ Profile found: ${driver.name} (${driver.phone})`);
     console.log("=".repeat(70));
     console.log("");
@@ -190,6 +246,8 @@ export const getDriverProfile = async (req, res) => {
     });
 
     // Format the response to match what the Flutter app expects
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     res.status(200).json({
       driver: {
         _id: driver._id,
@@ -206,13 +264,19 @@ export const getDriverProfile = async (req, res) => {
         isVerified: driver.isVerified || false,
         role: driver.role,
         isDriver: driver.isDriver,
+<<<<<<< HEAD
         documentCount,
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
       },
     });
   } catch (err) {
     console.error("❌ Error fetching driver profile:", err);
+<<<<<<< HEAD
     console.log("=".repeat(70));
     console.log("");
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     res.status(500).json({
       message: "Error fetching driver profile",
       error: err.message,
@@ -220,6 +284,7 @@ export const getDriverProfile = async (req, res) => {
   }
 };
 
+<<<<<<< HEAD
 // ======================================================================
 // 📤 Upload Driver Document
 // ======================================================================
@@ -230,6 +295,20 @@ export const getDriverProfile = async (req, res) => {
  * @access  Private (Driver)
  *
  * NOTE: multer should be configured to accept the file under field name 'document'
+=======
+/**
+ * Upload driver document (DL, Aadhaar, PAN, etc.)
+ * POST /api/driver/uploadDocument
+ *
+ * NOTE: multer should be configured to accept the file under field name 'document'
+ * Example route:
+ *   router.post(
+ *     '/api/driver/uploadDocument',
+ *     firebaseAuth,
+ *     upload.single('document'),
+ *     uploadDriverDocument
+ *   );
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
  */
 export const uploadDriverDocument = async (req, res) => {
   try {
@@ -250,6 +329,7 @@ export const uploadDriverDocument = async (req, res) => {
     // Read incoming fields (may be undefined)
     let { docType, vehicleType, extractedData, docSide } = req.body || {};
 
+<<<<<<< HEAD
     console.log("");
     console.log("=".repeat(70));
     console.log("📤 UPLOAD DRIVER DOCUMENT REQUEST");
@@ -261,6 +341,8 @@ export const uploadDriverDocument = async (req, res) => {
     console.log(`   File: ${file.originalname || "No file"}`);
     console.log("=".repeat(70));
 
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     // Parse extractedData safely (it may be a JSON string or already-parsed object)
     let parsedExtracted = {};
     try {
@@ -273,7 +355,11 @@ export const uploadDriverDocument = async (req, res) => {
         parsedExtracted = {};
       }
     } catch (e) {
+<<<<<<< HEAD
       // If parsing fails, fallback to empty object and continue
+=======
+      // If parsing fails, fallback to empty object and continue (we don't want to reject upload)
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
       console.warn(
         "⚠️ extractedData JSON parse failed, storing empty object:",
         e.message
@@ -281,6 +367,7 @@ export const uploadDriverDocument = async (req, res) => {
       parsedExtracted = {};
     }
 
+<<<<<<< HEAD
     // Normalize docType, vehicleType and side for consistent storage/validation
     const docTypeNormalized = (docType || "").toString().trim().toLowerCase();
     const vehicleTypeNormalized = (vehicleType || "").toString().trim().toLowerCase();
@@ -310,6 +397,41 @@ export const uploadDriverDocument = async (req, res) => {
       });
     }
 
+=======
+    // Normalize docType and vehicleType and side for consistent storage/validation
+    const docTypeNormalized = (docType || "").toString().trim().toLowerCase();
+    const vehicleTypeNormalized = (vehicleType || "")
+      .toString()
+      .trim()
+      .toLowerCase();
+    const side = (docSide || "front").toString().trim().toLowerCase();
+
+    // Validate required fields (we require docType and vehicleType; extractedData is optional)
+    if (!docTypeNormalized || !vehicleTypeNormalized) {
+      return res
+        .status(400)
+        .json({ message: "docType and vehicleType are required." });
+    }
+
+    // Validate docType against allowed docs for vehicleType (case-insensitive)
+    // requiredDocs may have keys in any case; map keys to lowercase for safety
+    const requiredDocsLowerMap = {};
+    Object.keys(requiredDocs).forEach((k) => {
+      requiredDocsLowerMap[k.toString().toLowerCase()] = (
+        requiredDocs[k] || []
+      ).map((d) => d.toString().toLowerCase());
+    });
+
+    const allowedDocs = requiredDocsLowerMap[vehicleTypeNormalized] || [];
+    if (allowedDocs.length > 0 && !allowedDocs.includes(docTypeNormalized)) {
+      return res.status(400).json({
+        message: `Invalid docType '${docType}' for vehicleType '${vehicleType}'. Allowed: ${allowedDocs.join(
+          ", "
+        )}`,
+      });
+    }
+
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     // Find user to get phone (for renaming file) and ensure user exists
     const user = await User.findById(userId);
     if (!user) {
@@ -317,16 +439,28 @@ export const uploadDriverDocument = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
+<<<<<<< HEAD
     // Build a new filename using phone/docType/side to avoid collisions
     const ext = path.extname(file.originalname) || "";
     const safePhone = (user.phone || "unknown").toString().replace(/[^0-9+]/g, "");
+=======
+    // Build a new filename using phone/docType/side to avoid collisions (keep extension)
+    const ext = path.extname(file.originalname) || "";
+    const safePhone = (user.phone || "unknown")
+      .toString()
+      .replace(/[^0-9+]/g, "");
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     const safeDocType = docTypeNormalized.replace(/\s+/g, "_");
     const newFileName = `${safePhone}.${safeDocType}.${side}${ext}`;
     const newPath = path.join(path.dirname(file.path), newFileName);
 
+<<<<<<< HEAD
     console.log(`   📁 Renaming file to: ${newFileName}`);
 
     // Rename file synchronously
+=======
+    // Rename file synchronously (acceptable for small single operations)
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     try {
       fs.renameSync(file.path, newPath);
     } catch (renameErr) {
@@ -334,15 +468,29 @@ export const uploadDriverDocument = async (req, res) => {
       // If rename fails, continue but save original path
     }
 
+<<<<<<< HEAD
     // Check if document already exists for this user/docType/side
     const existingDoc = await DriverDoc.findOne({
       userId: userId.toString(),
       docType: docTypeNormalized,
       side,
+=======
+    // Create and save DriverDoc with normalized values and parsedExtracted
+    const newDoc = new DriverDoc({
+      userId: userId.toString(),
+      docType: docTypeNormalized,
+      side,
+      url: newPath,
+      status: "pending",
+      remarks: "",
+      extractedData: parsedExtracted,
+      vehicleType: vehicleTypeNormalized,
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     });
 
     let savedDoc;
 
+<<<<<<< HEAD
     if (existingDoc) {
       // Update existing document
       console.log("   ♻️  Updating existing document");
@@ -368,6 +516,8 @@ export const uploadDriverDocument = async (req, res) => {
       savedDoc = await newDoc.save();
     }
 
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
     // ✅ Recompute user's overall documentStatus + isVerified
     await recomputeDriverDocumentStatus(userId.toString());
 
@@ -376,6 +526,7 @@ export const uploadDriverDocument = async (req, res) => {
       .select("_id documentStatus isVerified vehicleType")
       .lean();
 
+<<<<<<< HEAD
     console.log(`   ✅ Document saved: ${savedDoc._id}`);
     console.log("=".repeat(70));
     console.log("");
@@ -392,10 +543,16 @@ export const uploadDriverDocument = async (req, res) => {
         url: savedDoc.url,
         createdAt: savedDoc.createdAt,
       },
+=======
+    return res.status(200).json({
+      message: `${docTypeNormalized} ${side} uploaded successfully`,
+      document: newDoc,
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
       driver: updatedDriver || null,
     });
   } catch (err) {
     console.error("❌ Error uploading driver document:", err);
+<<<<<<< HEAD
     console.log("=".repeat(70));
     console.log("");
 
@@ -424,9 +581,21 @@ export const uploadDriverDocument = async (req, res) => {
  * @desc    Get all documents for a driver
  * @route   GET /api/driver/documents/:driverId
  * @access  Private (Driver)
+=======
+    return res
+      .status(500)
+      .json({ message: "Server error", error: err.message });
+  }
+};
+
+/**
+ * Get all documents for a driver
+ * GET /api/driver/documents/:driverId
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
  */
 export const getDriverDocuments = async (req, res) => {
   try {
+<<<<<<< HEAD
     const { driverId } = req.params;
 
     console.log("");
@@ -529,15 +698,39 @@ export const getDriverDocuments = async (req, res) => {
     const formattedDocs = docs.map((doc) => {
       let imageUrl = null;
 
+=======
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const docs = await DriverDoc.find({ userId: driverId }).lean();
+
+    // Get driver's vehicle type (optional)
+    const driver = await User.findById(driverId).lean();
+    const vehicleType = driver?.vehicleType || null;
+
+    if (!docs || docs.length === 0) {
+      return res.status(200).json({
+        message: "No documents found for this driver.",
+        docs: [],
+        vehicleType,
+      });
+    }
+
+    // Normalize stored file path to public URL (assumes files are saved under /uploads/...)
+    const docsWithImageUrl = docs.map((doc) => {
+      let imageUrl = null;
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
       if (doc.url) {
-        // Normalize path
+        // Replace backslashes and try to cut from 'uploads/' if present
         let cleanPath = doc.url.replace(/\\/g, "/");
+<<<<<<< HEAD
 
         // Extract path starting from 'uploads/'
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
         const uploadsIndex = cleanPath.indexOf("uploads/");
         if (uploadsIndex !== -1) {
           cleanPath = cleanPath.substring(uploadsIndex);
         } else {
+<<<<<<< HEAD
           // Fallback to file basename
           cleanPath = path.basename(cleanPath);
           cleanPath = `uploads/${cleanPath}`;
@@ -600,6 +793,40 @@ export const getDriverDocuments = async (req, res) => {
  * @route   POST /api/driver/documents/:docId/resend
  * @access  Private (Driver)
  */
+=======
+          // If uploads/ not found, try to find last occurrence of 'public' or 'static' folders
+          const publicIdx = cleanPath.lastIndexOf("public/");
+          if (publicIdx !== -1) {
+            cleanPath = cleanPath.substring(publicIdx + "public/".length);
+          } else {
+            // fallback to file basename
+            cleanPath = path.basename(cleanPath);
+            cleanPath = `uploads/${cleanPath}`;
+          }
+        }
+        imageUrl = `${baseUrl}/${cleanPath}`;
+        console.log(`📸 Document URL: ${imageUrl}`);
+      }
+      return {
+        ...doc,
+        imageUrl,
+      };
+    });
+
+    return res.status(200).json({
+      docs: docsWithImageUrl,
+      vehicleType,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching driver documents:", err);
+    return res
+      .status(500)
+      .json({ message: "Server error", error: err.message });
+  }
+};
+
+// REPLACE resendDriverDocument WITH THIS COMPLETE FUNCTION
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 export const resendDriverDocument = async (req, res) => {
   try {
     const { docId } = req.params;
@@ -628,7 +855,10 @@ export const resendDriverDocument = async (req, res) => {
     await recomputeDriverDocumentStatus(userId.toString());
 
     return res.status(200).json({
+<<<<<<< HEAD
       success: true,
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
       message: "Document ready for re-upload",
       docId: existing._id,
       docType: existing.docType,
@@ -640,10 +870,13 @@ export const resendDriverDocument = async (req, res) => {
   }
 };
 
+<<<<<<< HEAD
 // ======================================================================
 // 👤 Get Driver By ID
 // ======================================================================
 
+=======
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 /**
  * @desc    Get driver details by ID
  * @route   GET /api/driver/:driverId
@@ -652,6 +885,7 @@ export const resendDriverDocument = async (req, res) => {
 export const getDriverById = async (req, res) => {
   try {
     const { driverId } = req.params;
+<<<<<<< HEAD
 
     console.log("");
     console.log("=".repeat(70));
@@ -661,6 +895,9 @@ export const getDriverById = async (req, res) => {
     console.log("=".repeat(70));
 
     const driver = await User.findById(driverId).select("-__v").lean();
+=======
+    const driver = await User.findById(driverId).lean();
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 
     if (!driver) {
       console.log("   ❌ Driver not found");
@@ -673,6 +910,7 @@ export const getDriverById = async (req, res) => {
       });
     }
 
+<<<<<<< HEAD
     console.log(`   ✅ Driver found: ${driver.name} (${driver.phone})`);
     console.log("=".repeat(70));
     console.log("");
@@ -693,6 +931,12 @@ export const getDriverById = async (req, res) => {
 
     res.status(500).json({
       success: false,
+=======
+    return res.status(200).json(driver);
+  } catch (err) {
+    console.error("❌ Error fetching driver details:", err);
+    return res.status(500).json({
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
       message: "Error fetching driver details",
       error: err.message,
     });

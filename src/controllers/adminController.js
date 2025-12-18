@@ -188,15 +188,20 @@ export const getAllDrivers = async (req, res) => {
       };
     });
 
+<<<<<<< HEAD
     res.status(200).json({ 
       message: "Drivers fetched successfully", 
       drivers: formattedDrivers 
     });
+=======
+    res.status(200).json({ drivers: formattedDrivers });
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
   } catch (err) {
-    console.error("❌ Error fetching drivers:", err);
-    res.status(500).json({ message: "Server error while fetching drivers." });
+    console.log(err);
+    res.status(500).json({ message: "Server error" });
   }
 };
+
 
 export const getAllCustomers = async (req, res) => {
   try {
@@ -868,6 +873,7 @@ export const verifyDriverDocument = async (req, res) => {
     const { docId } = req.params;
     const { status, remarks, extractedData } = req.body;
 
+<<<<<<< HEAD
     if (!["approved", "rejected", "verified"].includes(status)) {
       return res.status(400).json({ message: "Invalid status. Must be 'approved', 'rejected', or 'verified'." });
     }
@@ -876,6 +882,16 @@ export const verifyDriverDocument = async (req, res) => {
     if (extractedData && typeof extractedData === "object") {
       updates.extractedData = extractedData;
     }
+=======
+    if (!["approved", "rejected", "verified"].includes(status))
+      return res.status(400).json({ message: "Invalid status." });
+
+    const updates = { status, remarks };
+    if (extractedData && typeof extractedData === "object") updates.extractedData = extractedData;
+
+    const updatedDoc = await DriverDoc.findByIdAndUpdate(docId, updates, { new: true });
+    if (!updatedDoc) return res.status(404).json({ message: "Document not found." });
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 
     const updatedDoc = await DriverDoc.findByIdAndUpdate(docId, updates, {
       new: true,
@@ -912,9 +928,13 @@ export const verifyDriverDocument = async (req, res) => {
   }
 };
 
+<<<<<<< HEAD
 /**
  * 🆕 Delete document image to free backend space
  */
+=======
+// 🆕 Delete document image to free backend space
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 export const deleteDriverDocumentImage = async (req, res) => {
   try {
     const { docId } = req.params;
@@ -924,18 +944,28 @@ export const deleteDriverDocumentImage = async (req, res) => {
 
     let filePath = doc.url.replace(/\\/g, "/");
     const uploadsIndex = filePath.indexOf("uploads/");
+<<<<<<< HEAD
     if (uploadsIndex !== -1) {
       filePath = path.join(process.cwd(), filePath.substring(uploadsIndex));
     } else {
       filePath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
     }
+=======
+    if (uploadsIndex !== -1)
+      filePath = path.join(process.cwd(), filePath.substring(uploadsIndex));
+    else filePath = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
       console.log(`🗑️ Deleted file: ${filePath}`);
+<<<<<<< HEAD
     } else {
       console.warn(`⚠️ File not found: ${filePath}`);
     }
+=======
+    } else console.warn(`⚠️ File not found: ${filePath}`);
+>>>>>>> 6049df7ec5642d30643132f7ca7502dee8f10538
 
     doc.url = null;
     doc.imageDeleted = true;
