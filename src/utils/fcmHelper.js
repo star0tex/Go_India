@@ -1,30 +1,72 @@
-const handleFCMError = (error) => {
-  if (error.message.includes('entity was not found')) {
-    console.error('FCM Error: Device token or recipient not found');
-    // Optionally remove invalid tokens from your database
-    return {
-      success: false,
-      error: 'RECIPIENT_NOT_FOUND',
-      message: 'Unable to send notification - recipient not found'
-    };
-  }
-  
-  return {
-    success: false,
-    error: 'FCM_ERROR',
-    message: error.message
-  };
+import admin from "../utils/firebase.js";
+import User from "../models/User.js";
+
+/**
+ * Convert all data payload values to STRING
+ * (FCM REQUIREMENT)
+ */
+const toStringData = (obj = {}) => {
+  const result = {};
+  Object.keys(obj).forEach((key) => {
+    if (obj[key] !== undefined && obj[key] !== null) {
+      result[key] = String(obj[key]);
+    }
+  });
+  return result;
 };
 
-export const sendFCMNotification = async (token, message) => {
+/**
+ * SAFE FCM SEND (NO invalid-argument errors)
+ */
+export const sendFCMNotification = async ({
+  userId,
+  token,
+  title,
+  body,
+  type = "general",
+  data = {},
+}) => {
+  if (!token || typeof token !== "string") {
+    console.warn("⚠️ Invalid FCM token, skipping");
+    return;
+  }
+
   try {
-    // Your existing FCM send logic here
-    const response = await admin.messaging().send({
+    await admin.messaging().send({
       token,
-      notification: message
+
+      notification: {
+        title: String(title),
+        body: String(body),
+      },
+
+      android: {
+        priority: "high",
+        notification: {
+          sound: "default",
+          channelId: "default",
+        },
+      },
+
+      data: toStringData({
+        type,
+        ...data,
+      }),
     });
-    return { success: true, response };
   } catch (error) {
-    return handleFCMError(error);
+    console.error("❌ FCM send error:", error.code, error.message);
+
+    // 🔥 Remove bad tokens automatically
+    if (
+      error.code === "messaging/invalid-argument" ||
+      error.code === "messaging/registration-token-not-registered"
+    ) {
+      if (userId) {
+        await User.findByIdAndUpdate(userId, {
+          $unset: { fcmToken: "" },
+        });
+        console.warn("🧹 Removed invalid FCM token for user:", userId);
+      }
+    }
   }
 };

@@ -11,6 +11,10 @@ import {
 } from "../controllers/userController.js";
 
 const router = express.Router();
+
+// =====================================================
+// 📱 FCM TOKEN
+// =====================================================
 router.post('/update-fcm', async (req, res) => {
   try {
     const { phone, fcmToken } = req.body;
@@ -49,19 +53,25 @@ router.post('/update-fcm', async (req, res) => {
     });
   }
 });
-// POST /api/user
+
+// =====================================================
+// 👤 USER CRUD
+// =====================================================
+
+// POST /api/user - Create user
 router.post("/", createUser);
 
 // ✅ IMPORTANT: Specific routes MUST come before generic routes
-router.get("/id/:id", getUserById);  // ← Move this BEFORE /:phone
+// GET /api/user/id/:id - Get user by ID
+router.get("/id/:id", getUserById);
 
-// GET /api/user/:phone
+// GET /api/user/:phone - Get user by phone
 router.get("/:phone", getUser);
 
-// PUT /api/user/:phone
+// PUT /api/user/:phone - Update user by phone
 router.put("/:phone", updateUser);
 
-// DELETE /api/user/:phone
+// DELETE /api/user/:phone - Delete user by phone
 router.delete("/:phone", deleteUser);
 
 export default router;

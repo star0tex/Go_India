@@ -1,8 +1,12 @@
-// walletController.js - SECURE UPI PAYMENT WITH RAZORPAY + INCENTIVES
+// walletController.js - SECURE UPI PAYMENT WITH RAZORPAY + DRIVER INCENTIVES
+// ⚠️ CUSTOMER COINS ARE AWARDED ONLY IN tripController.js - NOT HERE!
+
 import mongoose from 'mongoose';
 import Wallet from '../models/Wallet.js';
 import Trip from '../models/Trip.js';
 import User from '../models/User.js';
+// ❌ REMOVED: import Reward from '../models/Reward.js';
+// ❌ REMOVED: import RewardSettings from '../models/RewardSettings.js';
 import { io } from '../socket/socketHandler.js';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
@@ -62,7 +66,6 @@ const calculateFareBreakdown = (tripFare) => {
   };
 };
 
-// 🆕 UPDATED: Calculate wallet balance from transactions
 const calculateWalletBalance = (transactions) => {
   let totalEarnings = 0;
   let totalCommission = 0;
@@ -114,10 +117,9 @@ const getOrCreateWallet = async (driverId, session = null) => {
   return wallet;
 };
 
-// 🆕 Helper function to add ride incentive
 const addRideIncentive = async (userId, tripId) => {
   try {
-    const baseUrl = process.env.API_BASE_URL || 'https://1f4fb8dab9d9.ngrok-free.app';
+    const baseUrl = process.env.API_BASE_URL || 'https://4dd0f9dd1db1.ngrok-free.app';
     
     console.log('📞 Calling incentive API:', {
       url: `${baseUrl}/api/incentives/add-ride-incentive`,
@@ -135,7 +137,7 @@ const addRideIncentive = async (userId, tripId) => {
         headers: {
           'Content-Type': 'application/json'
         },
-        timeout: 5000 // 5 second timeout
+        timeout: 5000
       }
     );
 
@@ -156,6 +158,9 @@ const addRideIncentive = async (userId, tripId) => {
     return null;
   }
 };
+
+// ❌ REMOVED: awardCustomerCoins function
+// Customer coins are now ONLY awarded in tripController.js -> confirmCashCollection()
 
 const createRazorpayOrder = async (req, res) => {
   try {
@@ -390,7 +395,6 @@ const verifyRazorpayPayment = async (req, res) => {
       if (existingTxn) {
         paymentProcessing.delete(processingKey);
         
-        // Recalculate balances
         const balances = calculateWalletBalance(existingTransaction.transactions);
         
         return res.status(200).json({
@@ -443,7 +447,6 @@ const verifyRazorpayPayment = async (req, res) => {
 
     paymentProcessing.delete(processingKey);
 
-    // 🆕 Recalculate accurate balances
     const balances = calculateWalletBalance(updatedWallet.transactions);
 
     console.log('');
@@ -514,7 +517,6 @@ const getWalletByDriverId = async (req, res) => {
 
     const wallet = await getOrCreateWallet(driverId);
 
-    // 🆕 Recalculate balances from transactions
     const balances = calculateWalletBalance(wallet.transactions);
 
     const recentTransactions = wallet.transactions
@@ -582,8 +584,8 @@ const getPaymentProofs = async (req, res) => {
 };
 
 /**
- * Process cash collection after trip completion
- * 🆕 Now also adds per-ride incentive to wallet
+ * ✅ FIXED: Process cash collection - ONLY handles wallet/payment
+ * ⚠️ CUSTOMER COINS ARE NOT AWARDED HERE - handled by tripController.js
  */
 const processCashCollection = async (req, res) => {
   const session = await mongoose.startSession();
@@ -591,6 +593,15 @@ const processCashCollection = async (req, res) => {
 
   try {
     const { tripId, driverId } = req.body;
+
+    console.log('');
+    console.log('💳 ═══════════════════════════════════════════════════════════════');
+    console.log('💳 WALLET: processCashCollection');
+    console.log('💳 ⚠️ NOTE: This function does NOT award customer coins!');
+    console.log('💳 ⚠️ Customer coins are awarded in tripController.js');
+    console.log('💳 ═══════════════════════════════════════════════════════════════');
+    console.log(`   Trip ID: ${tripId}`);
+    console.log(`   Driver ID: ${driverId}`);
 
     if (!mongoose.Types.ObjectId.isValid(tripId) || !mongoose.Types.ObjectId.isValid(driverId)) {
       await session.abortTransaction();
@@ -600,7 +611,11 @@ const processCashCollection = async (req, res) => {
       });
     }
 
-    const trip = await Trip.findById(tripId).session(session);
+    // Get trip (NO need to populate customer for coins - that's handled elsewhere)
+    const trip = await Trip.findById(tripId)
+      .populate('customerId', 'phone name socketId')
+      .session(session);
+
     if (!trip) {
       await session.abortTransaction();
       return res.status(404).json({ success: false, message: 'Trip not found' });
@@ -639,6 +654,7 @@ const processCashCollection = async (req, res) => {
 
     const fareBreakdown = calculateFareBreakdown(tripFare);
 
+    // Update driver wallet
     const wallet = await Wallet.findOneAndUpdate(
       { driverId },
       {
@@ -678,36 +694,55 @@ const processCashCollection = async (req, res) => {
       }
     );
 
+    // Update trip payment status
     trip.paymentCollected = true;
     trip.paymentCollectedAt = new Date();
     await trip.save({ session });
 
+    // Free driver for next trip
+    await User.findByIdAndUpdate(
+      driverId,
+      {
+        $set: { 
+          currentTripId: null,
+          isBusy: false,
+          canReceiveNewRequests: false,
+          awaitingCashCollection: false,
+          lastCashCollectedAt: new Date()
+        }
+      },
+      { session }
+    );
+
     await session.commitTransaction();
 
     console.log('');
-    console.log('='.repeat(70));
-    console.log('💰 CASH COLLECTION CONFIRMED');
-    console.log(`   Trip ID: ${tripId}`);
-    console.log(`   Driver ID: ${driverId}`);
+    console.log('✅ WALLET TRANSACTION COMPLETE');
     console.log(`   Fare: ₹${tripFare}`);
     console.log(`   Driver Earning: ₹${fareBreakdown.driverEarning}`);
     console.log(`   Commission: ₹${fareBreakdown.commission}`);
-    console.log('='.repeat(70));
 
-    // 🆕 ADD PER-RIDE INCENTIVE (non-blocking)
-    addRideIncentive(driverId, tripId).then((incentiveData) => {
-      if (incentiveData) {
-        console.log('💎 Per-ride incentive added:', incentiveData);
-      }
-    }).catch(err => {
-      console.error('Error adding incentive:', err);
-    });
+    // ❌ REMOVED: Customer coin awarding
+    // ❌ REMOVED: awardCustomerCoins() call
+    // ✅ Customer coins are awarded ONLY in tripController.js -> confirmCashCollection()
 
-    // 🆕 Recalculate accurate balances
+    // Add DRIVER incentive (non-blocking)
+    addRideIncentive(driverId, tripId)
+      .then((incentiveData) => {
+        if (incentiveData) {
+          console.log('💎 Per-ride incentive added:', incentiveData);
+        }
+      })
+      .catch(err => {
+        console.error('⚠️ Error adding driver incentive:', err);
+      });
+
+    // Recalculate accurate balances
     const balances = calculateWalletBalance(wallet.transactions);
 
+    // Socket notifications
     const driver = await User.findById(driverId).select('socketId').lean();
-    const customer = await User.findById(trip.customerId).select('socketId').lean();
+    const customer = trip.customerId;
 
     if (driver?.socketId) {
       io.to(driver.socketId).emit('wallet:updated', {
@@ -730,14 +765,10 @@ const processCashCollection = async (req, res) => {
       });
     }
 
-    await User.findByIdAndUpdate(driverId, {
-      $set: { 
-        currentTripId: null,
-        isBusy: false,
-        canReceiveNewRequests: false
-      }
-    });
+    console.log('💳 ═══════════════════════════════════════════════════════════════');
+    console.log('');
 
+    // ❌ REMOVED: coinReward from response - it's handled by tripController
     res.status(200).json({
       success: true,
       message: 'Cash collection confirmed',
@@ -747,8 +778,10 @@ const processCashCollection = async (req, res) => {
         commissionPercentage: fareBreakdown.commissionPercentage,
         driverEarning: Number(fareBreakdown.driverEarning.toFixed(2))
       },
-      wallet: balances,
+      wallet: balances
+      // ❌ REMOVED: coinReward - coins are awarded by tripController.js
     });
+
   } catch (err) {
     if (session.inTransaction()) {
       await session.abortTransaction();

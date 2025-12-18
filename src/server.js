@@ -3,7 +3,8 @@ import express from 'express';
 import cors from 'cors';
 import cron from 'node-cron';
 import { cleanupStuckDrivers } from './jobs/driverCleanup.js';
-import User from './models/User.js'
+import User from './models/User.js';
+import Trip from './models/Trip.js';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import { createServer } from 'http';
@@ -20,10 +21,13 @@ import adminRoutes from './routes/adminRoutes.js';
 import tripRoutes from './routes/tripRoutes.js';
 import healthRoutes from './routes/healthRoutes.js';
 import walletRoutes from './routes/walletRoutes.js';
-import chatRoutes from './routes/chatRoutes.js'; // 📨 NEW: Import chat routes
+import chatRoutes from './routes/chatRoutes.js';
 import rideHistoryRoutes from './routes/rideHistory.js';
 import driverRideHistoryRoutes from './routes/driverRideHistory.js';
 import incentiveRoutes from './routes/incentiveRoutes.js';
+import rewardsRoutes from './routes/rewards.routes.js';
+import adminRewardsRoutes from './routes/admin.rewards.routes.js';
+import promotionRoutes from './routes/promotionRoutes.js'; // ✅ ADD THIS LINE
 
 import standbyReassignCron from './cron/standbyReassignCron.js';
 import { initSocket } from './socket/socketHandler.js';
@@ -48,7 +52,7 @@ app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
 app.get('/', (_req, res) => {
-  res.send('🌐 Go India backend live 🚀');
+  res.send('🌏 Go India backend live 🚀');
 });
 initSocket(io);
 
@@ -65,10 +69,40 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/trip', tripRoutes);
 app.use('/api', healthRoutes);
 app.use('/api/wallet', walletRoutes);
-app.use('/api/chat', chatRoutes); // 📨 NEW: Add chat routes
+app.use('/api/chat', chatRoutes);
 app.use(rideHistoryRoutes);
 app.use('/api/driver', driverRideHistoryRoutes);
 app.use('/api/incentives', incentiveRoutes);
+
+// ✅ Reward Routes
+app.use('/api/rewards', rewardsRoutes); // Customer reward routes
+app.use('/api/admin', adminRewardsRoutes); // Admin reward routes
+
+// ✅ Promotion Routes - ADD THIS LINE
+app.use('/api', promotionRoutes);
+
+// ✅ Debug: Log all registered routes
+console.log('\n📍 Registered Routes:');
+console.log('  Reward Routes:');
+console.log('    GET  /api/rewards/:customerId');
+console.log('    POST /api/rewards/award');
+console.log('    POST /api/rewards/redeem');
+console.log('    GET  /api/rewards/discount/:customerId');
+console.log('    POST /api/rewards/apply-discount');
+console.log('');
+console.log('  Admin Reward Routes:');
+console.log('    GET  /api/admin/rewards/settings');
+console.log('    PUT  /api/admin/rewards/settings');
+console.log('    GET  /api/admin/rewards/stats');
+console.log('    POST /api/admin/rewards/manual-award');
+console.log('');
+console.log('  Promotion Routes:');
+console.log('    POST /api/admin/promotions/upload');
+console.log('    GET  /api/admin/promotions');
+console.log('    GET  /api/promotions/active');
+console.log('    PUT  /api/admin/promotions/:id/toggle');
+console.log('    DELETE /api/admin/promotions/:id');
+console.log('    POST /api/promotions/:id/click\n');
 
 // ✅ Start Cron (every 2 minutes)
 setInterval(() => {
@@ -79,7 +113,8 @@ setInterval(() => {
 
 // ✅ 404 Handler
 app.use((req, res) => {
-  res.status(404).json({ message: '🔍 Route not found' });
+  console.log(`❌ 404 - Route not found: ${req.method} ${req.path}`);
+  res.status(404).json({ message: '🔍 Route not found', path: req.path });
 });
 
 // ✅ Error Handler
@@ -148,6 +183,14 @@ httpServer.listen(PORT, () => {
   console.log('📨 Chat system enabled');
   console.log('   - WebSocket: Active');
   console.log('   - REST API: /api/chat/*');
+  console.log('');
+  console.log('🎁 Reward system enabled');
+  console.log('   - Customer Rewards: /api/rewards/*');
+  console.log('   - Admin Panel: /api/admin/rewards/*');
+  console.log('');
+  console.log('🎯 Promotion system enabled');
+  console.log('   - Customer: /api/promotions/active');
+  console.log('   - Admin Panel: /api/admin/promotions/*');
   console.log('='.repeat(70));
   console.log('');
 });

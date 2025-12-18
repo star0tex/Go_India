@@ -3,7 +3,9 @@ import mongoose from "mongoose";
 
 const userSchema = new mongoose.Schema(
   {
-    // 📞 Basic Info
+    // =====================================================
+    // 📞 BASIC INFO
+    // =====================================================
     phone: {
       type: String,
       required: true,
@@ -26,84 +28,133 @@ const userSchema = new mongoose.Schema(
       type: String,
     },
 
-    // 🔑 Role system
+    // =====================================================
+    // 🔑 ROLE SYSTEM
+    // =====================================================
     role: {
       type: String,
       enum: ["customer", "driver"],
       default: "customer",
     },
 
-    // 🚗 Driver-specific
+    // =====================================================
+    // 🎁 REWARD SYSTEM FIELDS (Customer)
+    // =====================================================
+    coins: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    hasRedeemableDiscount: {
+      type: Boolean,
+      default: false,
+    },
+    totalCoinsEarned: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    totalCoinsRedeemed: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    // =====================================================
+    // 🚗 DRIVER-SPECIFIC FIELDS
+    // =====================================================
     isDriver: {
       type: Boolean,
       default: false,
-      index: true, // ✅ Index for driver queries
+      index: true,
     },
     vehicleType: {
       type: String,
       enum: ["bike", "auto", "car", "premium", "xl"],
       default: null,
-      index: true, // ✅ Index for vehicle type filtering
+      index: true,
     },
     city: {
       type: String,
     },
 
-    // 📍 Location & Status
+    // =====================================================
+    // 📍 LOCATION & STATUS
+    // =====================================================
     location: {
       type: {
         type: String,
-        enum: ['Point'],
+        enum: ["Point"],
         required: true,
-        default: 'Point',
+        default: "Point",
       },
       coordinates: {
         type: [Number], // [longitude, latitude]
         required: true,
+        default: undefined, // ✅ No default location
       },
+    },
+
+    // ✅ Location sequence tracking (prevents out-of-order updates)
+    locationSequence: {
+      type: Number,
+      default: 0,
+      min: 0,
+      index: true,
+    },
+
+    // ✅ Last location update timestamp
+    lastLocationUpdate: {
+      type: Date,
+      default: null,
+      index: true,
     },
 
     isOnline: {
       type: Boolean,
       default: false,
-      index: true, // ✅ Index for online/offline queries
+      index: true,
     },
 
-    // ✅ FIXED: Single definition of currentTripId with all features
+    // ✅ Current active trip reference
     currentTripId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Trip',
+      ref: "Trip",
       default: null,
-      index: true, // ✅ Important for query performance
+      index: true,
     },
 
     // ✅ Driver availability status
     isBusy: {
       type: Boolean,
       default: false,
-      index: true, // ✅ Index for availability queries
+      index: true,
     },
 
-    // ✅ Proximity-based requests (Requirement #6)
+    // ✅ Proximity-based requests
     canReceiveNewRequests: {
       type: Boolean,
       default: false,
     },
 
-    // ✅ NEW: Cash collection tracking
+    // ✅ Cash collection tracking
     awaitingCashCollection: {
       type: Boolean,
       default: false,
-      index: true, // ✅ Important for disconnect handler queries
+      index: true,
     },
 
-    // ✅ Socket and real-time
+    // =====================================================
+    // 🔌 SOCKET & REAL-TIME
+    // =====================================================
     socketId: {
       type: String,
       default: null,
     },
 
-    // ✅ Driver profile
+    // =====================================================
+    // 👤 DRIVER PROFILE
+    // =====================================================
     rating: {
       type: Number,
       default: 4.8,
@@ -126,7 +177,9 @@ const userSchema = new mongoose.Schema(
       type: String,
     },
 
-    // ✅ Verification & Documents
+    // =====================================================
+    // ✅ VERIFICATION & DOCUMENTS
+    // =====================================================
     documentStatus: {
       type: String,
       enum: ["pending", "approved", "rejected"],
@@ -139,15 +192,19 @@ const userSchema = new mongoose.Schema(
     firebaseUid: {
       type: String,
       unique: true,
-      sparse: true, // Allows null values but ensures uniqueness for non-null
+      sparse: true, // Allows null but ensures uniqueness for non-null
     },
 
-    // 🔔 Notifications
+    // =====================================================
+    // 🔔 NOTIFICATIONS
+    // =====================================================
     fcmToken: {
       type: String,
     },
 
-    // ✅ Timestamps for debugging and cash collection tracking
+    // =====================================================
+    // ⏰ TIMESTAMP TRACKING
+    // =====================================================
     lastTripAcceptedAt: {
       type: Date,
       default: null,
@@ -162,82 +219,110 @@ const userSchema = new mongoose.Schema(
     },
     lastCashCollectedAt: {
       type: Date,
-      default: null, // ✅ NEW: Track when cash was last collected
+      default: null,
     },
     lastDisconnectedAt: {
       type: Date,
-      default: null, // ✅ Track socket disconnections
+      default: null,
     },
-    // 💰 INCENTIVE SYSTEM FIELDS - ADD THESE
-totalCoinsCollected: {
-  type: Number,
-  default: 0,
-  min: 0,
-},
-totalIncentiveEarned: {
-  type: Number,
-  default: 0.0,
-  min: 0,
-},
-totalRidesCompleted: {
-  type: Number,
-  default: 0,
-  min: 0,
-},
-lastRideId: {
-  type: mongoose.Schema.Types.ObjectId,
-  ref: 'Trip',
-  default: null,
-},
-lastIncentiveAwardedAt: {
-  type: Date,
-  default: null,
-},
-lastWithdrawal: {
-  type: Date,
-  default: null,
-},
-// wallet field should already exist, but if not:
-wallet: {
-  type: Number,
-  default: 0.0,
-  min: 0,
-},
+
+    // =====================================================
+    // 💰 INCENTIVE SYSTEM FIELDS (Driver)
+    // =====================================================
+    totalCoinsCollected: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    totalIncentiveEarned: {
+      type: Number,
+      default: 0.0,
+      min: 0,
+    },
+    totalRidesCompleted: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    lastRideId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Trip",
+      default: null,
+    },
+    lastIncentiveAwardedAt: {
+      type: Date,
+      default: null,
+    },
+    lastWithdrawal: {
+      type: Date,
+      default: null,
+    },
+    wallet: {
+      type: Number,
+      default: 0.0,
+      min: 0,
+    },
   },
-  { 
+  {
     timestamps: true,
-    // ✅ Optimize for updates
-    minimize: false, // Keep empty objects
+    minimize: false, // ✅ Keep empty objects
   }
 );
 
+// =====================================================
+// 📇 INDEXES
+// =====================================================
+
+// ✅ Geospatial index for location-based queries
+userSchema.index({ location: "2dsphere" });
 
 // ✅ CRITICAL: Compound index for driver availability queries
-userSchema.index({ 
-  isDriver: 1, 
-  isOnline: 1, 
-  isBusy: 1, 
-  vehicleType: 1, 
-  location: '2dsphere' 
+userSchema.index({
+  isDriver: 1,
+  isOnline: 1,
+  isBusy: 1,
+  vehicleType: 1,
+  location: "2dsphere",
 });
 
-// ✅ Additional index for trip assignment
-userSchema.index({ 
-  isDriver: 1, 
-  currentTripId: 1 
-});
-
-// ✅ NEW: Index for cash collection queries (performance optimization)
-userSchema.index({ 
-  awaitingCashCollection: 1, 
+// ✅ Trip assignment index
+userSchema.index({
+  isDriver: 1,
   currentTripId: 1,
-  lastTripCompletedAt: 1
 });
 
-// ✅ Index for finding drivers with stale cash collection (monitoring)
+// ✅ Cash collection queries
 userSchema.index({
   awaitingCashCollection: 1,
-  lastTripCompletedAt: 1
+  currentTripId: 1,
+  lastTripCompletedAt: 1,
+});
+
+// ✅ Stale cash collection monitoring
+userSchema.index({
+  awaitingCashCollection: 1,
+  lastTripCompletedAt: 1,
+});
+
+// ✅ Customer reward queries
+userSchema.index({
+  role: 1,
+  coins: 1,
+  hasRedeemableDiscount: 1,
+});
+
+// ✅ Location tracking performance
+userSchema.index({
+  isDriver: 1,
+  isOnline: 1,
+  locationSequence: 1,
+  lastLocationUpdate: 1,
+});
+
+// ✅ Stale location data detection
+userSchema.index({
+  isOnline: 1,
+  lastLocationUpdate: 1,
 });
 
 // ✅ Prevent OverwriteModelError in dev

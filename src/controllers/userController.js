@@ -35,7 +35,28 @@ export const getUserById = async (req, res) => {
     console.error("Error in getUserById:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
-};/* CREATE or UPDATE USER */
+};
+// 🔔 SAVE FCM TOKEN (Driver / Customer)
+export const saveFcmToken = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { fcmToken } = req.body;
+
+    if (!fcmToken) {
+      return res.status(400).json({ message: "FCM token is required" });
+    }
+
+    await User.findByIdAndUpdate(userId, { fcmToken });
+
+    return res.status(200).json({
+      message: "FCM token saved successfully",
+    });
+  } catch (error) {
+    console.error("❌ saveFcmToken error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+/* CREATE or UPDATE USER */
 export const createUser = async (req, res) => {
   try {
     const { phone, name, gender } = req.body;

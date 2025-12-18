@@ -28,7 +28,7 @@ export function calcFare({
   const internal = {
     bike: { baseFare: 30, baseFareDistanceKm: 1, perKm: 10, minFare: 55, platformCommission: 0.10 },
     auto: { baseFare: 45, baseFareDistanceKm: 2, perKm: 14, minFare: 70, platformCommission: 0.10 },
-    car: { baseFare: 70, baseFareDistanceKm: 2, perKm: 22, minFare: 90, platformCommission: 0.12 },
+    car: { baseFare: 70, baseFareDistanceKm: 2, perKm: 22, minFare: 90, platformCommission: 0.12 }, 
     premium: { baseFare: 80, baseFareDistanceKm: 2, perKm: 24, minFare: 100, platformCommission: 0.12 },
     xl: { baseFare: 95, baseFareDistanceKm: 2, perKm: 26, minFare: 120, platformCommission: 0.12 },
   };

@@ -113,6 +113,30 @@ const tripSchema = new mongoose.Schema({
     min: 0,
   },
 
+  // ============================================================
+  // ✅ NEW: Discount tracking fields
+  // ============================================================
+  originalFare: {
+    type: Number,
+    default: null,
+    min: 0,
+  },
+  discountApplied: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  coinsUsed: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  discountDetails: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+  },
+  // ============================================================
+
   otp: {
     type: String,
     default: null,
@@ -164,9 +188,9 @@ const tripSchema = new mongoose.Schema({
     default: false,
   },
   paymentCollectedAt: {
-  type: Date,
-  default: null
-},
+    type: Date,
+    default: null
+  },
   paymentMethod: {
     type: String,
     enum: ['Cash', 'Online', 'Wallet'],
@@ -194,13 +218,18 @@ const tripSchema = new mongoose.Schema({
     min: 1,
   },
   
-  // ✅ ADD cancellation timestamp
+  // ✅ Cancellation fields
   cancelledBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
   },
   cancelledAt: {
     type: Date,
+    default: null,
+  },
+  // ✅ NEW: Cancellation reason
+  cancellationReason: {
+    type: String,
     default: null,
   },
   
@@ -244,6 +273,17 @@ tripSchema.pre('save', function(next) {
   next();
 });
 
+// ✅ NEW: Virtual to check if discount was applied
+tripSchema.virtual('hasDiscount').get(function() {
+  return this.discountApplied > 0;
+});
+
+// ✅ NEW: Virtual to get savings percentage
+tripSchema.virtual('savingsPercentage').get(function() {
+  if (!this.originalFare || this.originalFare === 0) return 0;
+  return Math.round((this.discountApplied / this.originalFare) * 100);
+});
+
 // Ensure geospatial indexes
 tripSchema.index({ 'pickup.coordinates': '2dsphere' });
 tripSchema.index({ 'drop.coordinates': '2dsphere' });
@@ -255,5 +295,13 @@ tripSchema.index({ assignedDriver: 1 });
 tripSchema.index({ customerId: 1, status: 1 });
 tripSchema.index({ assignedDriver: 1, status: 1 });
 tripSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+// ✅ NEW: Index for discount-related queries
+tripSchema.index({ discountApplied: 1 });
+tripSchema.index({ coinsUsed: 1 });
+
+// Ensure virtuals are included when converting to JSON/Object
+tripSchema.set('toJSON', { virtuals: true });
+tripSchema.set('toObject', { virtuals: true });
 
 export default mongoose.model('Trip', tripSchema);

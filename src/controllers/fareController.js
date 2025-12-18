@@ -36,18 +36,28 @@ export const createFare = asyncHandler(async (req, res) => {
    * --------------------------------------------------------- */
   let sharedRoute = null;
   if (origin && destination) {
-    try {
-      console.log("📡 Fetching Google route (shared for all vehicles)...");
-      sharedRoute = await getGoogleRouteDuration(origin, destination, "car"); // baseline mode
-      if (sharedRoute) {
-        console.log(
-          `✅ Google Route (car): ${sharedRoute.distanceKm.toFixed(2)} km | ${(sharedRoute.durationSec / 60).toFixed(1)} mins`
-        );
-      }
-    } catch (err) {
-      console.error("⚠️ Google Maps fetch failed:", err.message);
+  const gStart = process.hrtime.bigint(); // ⏱ START Google timer
+  try {
+    console.log("📡 Fetching Google route (shared for all vehicles)...");
+    sharedRoute = await getGoogleRouteDuration(origin, destination, "car");
+
+    if (sharedRoute) {
+      console.log(
+        `✅ Google Route (car): ${sharedRoute.distanceKm.toFixed(2)} km | ${(sharedRoute.durationSec / 60).toFixed(1)} mins`
+      );
+    }
+  } catch (err) {
+    console.error("⚠️ Google Maps fetch failed:", err.message);
+  } finally {
+    // ⏱ END Google timer (store in profiler)
+    if (req.__profile) {
+      req.__profile.googleMs += Number(
+        process.hrtime.bigint() - gStart
+      ) / 1e6;
     }
   }
+}
+
 
   // Use shared route for all vehicles
   let liveDistanceKm = sharedRoute?.distanceKm || distanceKm;
@@ -65,7 +75,15 @@ export const createFare = asyncHandler(async (req, res) => {
   };
   if (category !== "long") query.city = new RegExp(`^${city}$`, "i");
 
-  const dbRate = await Rate.findOne(query);
+const dbStart = process.hrtime.bigint(); // ⏱ START Mongo timer
+const dbRate = await Rate.findOne(query);
+
+// ⏱ END Mongo timer
+if (req.__profile) {
+  req.__profile.mongoMs += Number(
+    process.hrtime.bigint() - dbStart
+  ) / 1e6;
+}
   if (dbRate)
     console.log("📦 [DB RATE FOUND]", {
       vehicleType: dbRate.vehicleType,

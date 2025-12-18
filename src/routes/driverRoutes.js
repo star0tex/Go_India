@@ -4,17 +4,24 @@ import {
   uploadDriverDocument,
   getDriverDocuments,
   getDriverById,
-  getDriverProfile
+  getDriverProfile,
+  updateDocumentStatus,
+  resendDriverDocument,
 } from "../controllers/documentController.js";
 import { protect } from "../middlewares/authMiddleware.js";
 import { uploadDocument, uploadProfilePhoto } from "../middlewares/multer.js";
 import {
   updateDriverVehicleType,
-  updateDriverProfile
+  updateDriverProfile,
+  clearDriverState,
 } from "../controllers/driverController.js";
 import User from "../models/User.js";
 
 const router = express.Router();
+
+// =====================================================
+// 📍 NEARBY DRIVERS
+// =====================================================
 
 /**
  * @route   GET /api/driver/nearby
@@ -52,9 +59,18 @@ router.get("/nearby", protect, async (req, res) => {
 
     console.log(`🔍 Searching for drivers near: [${latitude}, ${longitude}] within ${radiusKm}km`);
 
+    // ✅ Only find TRULY online drivers with recent location updates
     const drivers = await User.find({
       isDriver: true,
       isOnline: true,
+
+      // ✅ CRITICAL: Only drivers who updated location in last 10 minutes
+      lastLocationUpdate: {
+        $exists: true,
+        $ne: null,
+        $gte: new Date(Date.now() - 10 * 60 * 1000),
+      },
+
       location: {
         $near: {
           $geometry: {
@@ -65,11 +81,17 @@ router.get("/nearby", protect, async (req, res) => {
         },
       },
     })
-      .select("name phone vehicleType location rating vehicleBrand vehicleNumber")
+      .select("name phone vehicleType location rating vehicleBrand vehicleNumber lastLocationUpdate")
       .limit(50)
       .lean();
 
-    console.log(`✅ Found ${drivers.length} nearby drivers`);
+    console.log(`✅ Found ${drivers.length} nearby ACTIVE drivers`);
+
+    // ✅ DEBUG: Show each driver's last update time
+    drivers.forEach((driver) => {
+      const minutesAgo = Math.round((Date.now() - new Date(driver.lastLocationUpdate)) / 60000);
+      console.log(`   📍 ${driver.name}: updated ${minutesAgo} min ago`);
+    });
 
     const formattedDrivers = drivers.map((driver) => ({
       id: driver._id.toString(),
@@ -90,8 +112,7 @@ router.get("/nearby", protect, async (req, res) => {
     if (error.name === "MongoError" && error.code === 27) {
       return res.status(500).json({
         success: false,
-        message:
-          "Geospatial index not found. Please ensure location field has a 2dsphere index.",
+        message: "Geospatial index not found. Please ensure location field has a 2dsphere index.",
         error: error.message,
       });
     }
@@ -103,6 +124,10 @@ router.get("/nearby", protect, async (req, res) => {
     });
   }
 });
+
+// =====================================================
+// 👤 DRIVER PROFILE
+// =====================================================
 
 /**
  * @route   GET /api/driver/profile
@@ -126,13 +151,6 @@ router.post("/setVehicleType", protect, updateDriverVehicleType);
 router.post("/updateProfile", protect, updateDriverProfile);
 
 /**
- * @route   GET /api/driver/documents/:driverId
- * @desc    Get driver documents by driver ID
- * @access  Protected
- */
-router.get("/documents/:driverId", protect, getDriverDocuments);
-
-/**
  * @route   POST /api/driver/uploadProfilePhoto
  * @desc    Upload driver profile photo
  * @access  Protected
@@ -143,6 +161,42 @@ router.post(
   uploadProfilePhoto.single("image"),
   uploadDriverProfilePhoto
 );
+
+// =====================================================
+// 🔄 DRIVER STATE
+// =====================================================
+
+/**
+ * @route   POST /api/driver/clear-state
+ * @desc    Clear driver state (isBusy, currentTripId, canReceiveNewRequests)
+ * @access  Protected
+ */
+router.post("/clear-state", protect, clearDriverState);
+
+// =====================================================
+// 📄 DRIVER DOCUMENTS
+// =====================================================
+
+/**
+ * @route   GET /api/driver/documents/:driverId
+ * @desc    Get driver documents by driver ID
+ * @access  Protected
+ */
+router.get("/documents/:driverId", protect, getDriverDocuments);
+
+/**
+ * @route   PATCH /api/driver/documents/:docId/status
+ * @desc    Update document status (Admin only)
+ * @access  Protected
+ */
+router.patch("/documents/:docId/status", protect, updateDocumentStatus);
+
+/**
+ * @route   PUT /api/driver/documents/:docId/resend
+ * @desc    Mark document as pending so driver can resend
+ * @access  Protected
+ */
+router.put("/documents/:docId/resend", protect, resendDriverDocument);
 
 /**
  * @route   POST /api/driver/uploadDocument
@@ -155,6 +209,10 @@ router.post(
   uploadDocument.single("document"),
   uploadDriverDocument
 );
+
+// =====================================================
+// 🔍 GET DRIVER BY ID (Keep at bottom - generic route)
+// =====================================================
 
 /**
  * @route   GET /api/driver/:driverId

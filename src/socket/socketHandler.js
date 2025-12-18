@@ -6,19 +6,21 @@ import { startNotificationRetryJob } from '../utils/notificationRetry.js';
 import { startStaleTripCleanup } from '../utils/staleTripsCleanup.js';
 import { sendToDriver } from '../utils/fcmSender.js';
 import { promoteNextStandby, reassignStandbyDriver } from '../controllers/standbyController.js';
+import { broadcastToDrivers } from '../utils/tripBroadcaster.js';
+
 import {
   createShortTrip,
   createParcelTrip,
   createLongTrip,
 } from '../controllers/tripController.js';
 import { emitTripError } from '../utils/errorEmitter.js';
-
+const TRIP_TIMEOUT_MS = 60000; // 60 seconds
 const ChatMessage = mongoose.models.ChatMessage || ChatMessageModel;
 
 let io;
 
-const connectedDrivers = new Map(); // socketId => MongoDB _id
-const connectedCustomers = new Map(); // socketId => MongoDB _id
+const connectedDrivers = new Map();
+const connectedCustomers = new Map();
 
 const DISTANCE_LIMITS = {
   short: 5000,
@@ -26,30 +28,22 @@ const DISTANCE_LIMITS = {
   long_same_day: 20000,
   long_multi_day: 50000,
 };
-/**
- * Award incentives to driver after ride completion
- * Internal function - no HTTP needed
- */
+
 async function awardIncentivesToDriver(driverId, tripId) {
   try {
     console.log('');
     console.log('💰 AWARDING INCENTIVES (Socket)');
     console.log(`   Driver ID: ${driverId}`);
-    console.log(`   Trip ID: ${tripId}`);
 
-    // Get incentive settings
     const db = mongoose.connection.db;
     const IncentiveSettings = db.collection('incentiveSettings');
     const settings = await IncentiveSettings.findOne({ type: 'global' });
 
     if (!settings || (settings.perRideIncentive === 0 && settings.perRideCoins === 0)) {
-      console.log('   ⚠️ No incentives configured - skipping');
+      console.log('   ⚠️ No incentives configured');
       return { success: true, awarded: false };
     }
 
-    console.log(`   Settings: ₹${settings.perRideIncentive} + ${settings.perRideCoins} coins`);
-
-    // Get driver
     const driver = await User.findById(driverId)
       .select('name phone totalCoinsCollected totalIncentiveEarned totalRidesCompleted wallet');
 
@@ -58,7 +52,6 @@ async function awardIncentivesToDriver(driverId, tripId) {
       return { success: false, error: 'Driver not found' };
     }
 
-    // Calculate new values
     const currentCoins = driver.totalCoinsCollected || 0;
     const currentIncentive = driver.totalIncentiveEarned || 0.0;
     const currentRides = driver.totalRidesCompleted || 0;
@@ -69,7 +62,6 @@ async function awardIncentivesToDriver(driverId, tripId) {
     const newRides = currentRides + 1;
     const newWallet = currentWallet + settings.perRideIncentive;
 
-    // Update driver with incentives
     await User.findByIdAndUpdate(driverId, {
       $set: {
         totalCoinsCollected: newCoins,
@@ -81,12 +73,7 @@ async function awardIncentivesToDriver(driverId, tripId) {
       }
     });
 
-    console.log('   ✅ Incentives awarded successfully:');
-    console.log(`      Driver: ${driver.name} (${driver.phone})`);
-    console.log(`      Coins: ${currentCoins} → ${newCoins} (+${settings.perRideCoins})`);
-    console.log(`      Cash: ₹${currentIncentive.toFixed(2)} → ₹${newIncentive.toFixed(2)} (+₹${settings.perRideIncentive})`);
-    console.log(`      Wallet: ₹${currentWallet.toFixed(2)} → ₹${newWallet.toFixed(2)}`);
-    console.log(`      Total Rides: ${currentRides} → ${newRides}`);
+    console.log('   ✅ Incentives awarded');
     console.log('');
 
     return {
@@ -94,12 +81,7 @@ async function awardIncentivesToDriver(driverId, tripId) {
       awarded: true,
       coins: settings.perRideCoins,
       cash: settings.perRideIncentive,
-      newTotals: {
-        coins: newCoins,
-        incentive: newIncentive,
-        rides: newRides,
-        wallet: newWallet
-      }
+      newTotals: { coins: newCoins, incentive: newIncentive, rides: newRides, wallet: newWallet }
     };
 
   } catch (error) {
@@ -145,12 +127,12 @@ const resolveUserByIdOrPhone = async (idOrPhone) => {
   }
 };
 
-// Helper functions for distance calculation
 function toRad(value) {
   return value * Math.PI / 180;
 }
+
 function calculateDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371; // km
+  const R = 6371;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
@@ -158,12 +140,9 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c; // km
+  return R * c;
 }
 
-/**
- * Initialize socket.io handlers
- */
 export const initSocket = (ioInstance) => {
   io = ioInstance;
 
@@ -171,43 +150,54 @@ export const initSocket = (ioInstance) => {
     console.log(`🟢 New connection: ${socket.id}`);
 
     // DRIVER STATUS UPDATE
-    socket.on('updateDriverStatus', async (payload = {}) => {
-      try {
-        const {
-          driverId,
-          isOnline,
-          location,
-          lat,
-          lng,
-          fcmToken,
-          profileData,
-          vehicleType,
-        } = payload;
+socket.on('updateDriverStatus', async (payload = {}) => {
+  try {
+    const {
+      driverId,
+      isOnline,
+      location,
+      lat,
+      lng,
+      fcmToken,
+      profileData,
+      vehicleType,
+    } = payload;
 
-        if (!driverId) return;
+    if (!driverId) return;
 
-        const user = await resolveUserByIdOrPhone(driverId);
-        if (!user) {
-          console.warn(`updateDriverStatus: user not found for ${driverId}`);
-          return;
-        }
+    const user = await resolveUserByIdOrPhone(driverId);
+    if (!user) {
+      console.warn(`updateDriverStatus: user not found for ${driverId}`);
+      return;
+    }
 
-        const set = {
-          socketId: socket.id,
-          isOnline: !!isOnline,
-        };
+    const set = {
+      socketId: socket.id,
+      isOnline: !!isOnline,
+      locationSequence: 0,  // ✅ ADD THIS LINE - Reset sequence on reconnect
+    };
 
-        if (location?.coordinates?.length === 2) {
-          set.location = { type: 'Point', coordinates: location.coordinates };
-        } else if (
-          typeof lat === 'number' &&
-          typeof lng === 'number' &&
-          !Number.isNaN(lat) &&
-          !Number.isNaN(lng)
-        ) {
-          set.location = { type: 'Point', coordinates: [lng, lat] };
-        }
-
+    if (location?.coordinates?.length === 2) {
+      set.location = { type: 'Point', coordinates: location.coordinates };
+      set.lastLocationUpdate = new Date();
+    } else if (
+      typeof lat === 'number' &&
+      typeof lng === 'number' &&
+      !Number.isNaN(lat) &&
+      !Number.isNaN(lng)
+    ) {
+      set.location = { type: 'Point', coordinates: [lng, lat] };
+      set.lastLocationUpdate = new Date();
+    }
+    else if (
+      typeof lat === 'number' &&
+      typeof lng === 'number' &&
+      !Number.isNaN(lat) &&
+      !Number.isNaN(lng)
+    ) {
+      set.location = { type: 'Point', coordinates: [lng, lat] };
+      set.lastLocationUpdate = new Date(); // ✅ ADD THIS
+    }
         if (fcmToken) set.fcmToken = fcmToken;
 
         const allowedProfileKeys = [
@@ -321,8 +311,7 @@ export const initSocket = (ioInstance) => {
           socket.emit('customer:registered', {
             success: false,
             error: 'User not found in database',
-            providedId: customerId,
-            hint: 'Make sure you are passing MongoDB _id from login response'
+            providedId: customerId
           });
           return;
         }
@@ -407,45 +396,91 @@ export const initSocket = (ioInstance) => {
       }
     });
 
-    // DRIVER ACCEPT TRIP (atomic lock, OTP, notify customer + other drivers)
+    // ✅ COMPLETE FIX: DRIVER ACCEPT TRIP with proper rollback
     socket.on('driver:accept_trip', async ({ tripId, driverId }) => {
       try {
-        console.log(`🚗 Driver ${driverId} attempting to accept trip ${tripId}`);
+        console.log('');
+        console.log('='.repeat(70));
+        console.log(`🚗 [SOCKET] Driver ${driverId} attempting to accept trip ${tripId}`);
+        console.log('='.repeat(70));
 
-        // Atomic lock on driver
+        if (!driverId || !tripId) {
+          socket.emit('trip:accept_failed', { 
+            message: 'Missing driverId or tripId', 
+            reason: 'invalid_request' 
+          });
+          return;
+        }
+
+        // ✅ ATOMIC STEP 1: Reserve driver (check availability + mark busy in ONE operation)
         const driver = await User.findOneAndUpdate(
           {
             _id: driverId,
-            $or: [
-              { isBusy: { $ne: true } },
-              { isBusy: { $exists: false } }
-            ],
-            $or: [
-              { currentTripId: { $exists: false } },
-              { currentTripId: null }
+            // ✅ Only update if driver is truly available
+            $and: [
+              {
+                $or: [
+                  { isBusy: { $ne: true } },
+                  { isBusy: { $exists: false } }
+                ]
+              },
+              {
+                $or: [
+                  { currentTripId: null },
+                  { currentTripId: { $exists: false } }
+                ]
+              }
             ]
           },
           {
             $set: {
               isBusy: true,
               currentTripId: tripId,
+              canReceiveNewRequests: false,
               lastTripAcceptedAt: new Date()
             }
           },
           {
             new: true,
-            select: 'name phone photoUrl rating vehicleBrand vehicleNumber location isBusy currentTripId'
+            select: 'name phone photoUrl rating vehicleBrand vehicleNumber location'
           }
         ).lean();
 
+        // ❌ Driver was already busy - ATOMIC REJECTION
         if (!driver) {
-          socket.emit('trip:accept_failed', { message: 'You are already on another trip or cannot accept this trip', reason: 'driver_busy' });
+          console.log(`⚠️ Driver ${driverId} is already on another trip`);
+          socket.emit('trip:accept_failed', { 
+            message: 'You are already on another trip', 
+            reason: 'driver_busy' 
+          });
           return;
         }
 
-        // Reserve trip
+        console.log(`✅ [SOCKET] Driver ${driverId} atomically reserved`);
+        console.log(`   - isBusy: true`);
+        console.log(`   - currentTripId: ${tripId}`);
+
+        // ✅ ATOMIC STEP 2: Reserve trip (check status + cancellation + assign in ONE operation)
         const trip = await Trip.findOneAndUpdate(
-          { _id: tripId, status: 'requested' },
+          { 
+            _id: tripId, 
+            status: 'requested',
+            // ✅ Ensure no cancellation in progress
+            $and: [
+              {
+                $or: [
+                  { cancelledAt: { $exists: false } },
+                  { cancelledAt: null }
+                ]
+              },
+              {
+                $or: [
+                  { cancelledBy: { $exists: false } },
+                  { cancelledBy: null }
+                ]
+              }
+            ]
+          },
           {
             $set: {
               assignedDriver: driverId,
@@ -456,37 +491,86 @@ export const initSocket = (ioInstance) => {
           { new: true }
         ).lean();
 
+        // ❌ Trip already taken, cancelled, or not found - ROLLBACK DRIVER
         if (!trip) {
-          // rollback driver
-          await User.findByIdAndUpdate(driverId, { $set: { isBusy: false, currentTripId: null } });
-          socket.emit('trip:accept_failed', { message: 'Trip no longer available', reason: 'trip_taken' });
+          console.log(`⚠️ Trip ${tripId} no longer available - ROLLING BACK DRIVER`);
+          
+          // ✅ CRITICAL: Rollback driver reservation
+          await User.findByIdAndUpdate(driverId, {
+            $set: { 
+              isBusy: false, 
+              currentTripId: null,
+              canReceiveNewRequests: false
+            }
+          });
+          
+          console.log(`✅ Driver ${driverId} rolled back to available state`);
+          
+          socket.emit('trip:accept_failed', { 
+            message: 'Trip no longer available (already accepted or cancelled)', 
+            reason: 'trip_unavailable' 
+          });
           return;
         }
 
-        const customer = await User.findById(trip.customerId).select('name phone photoUrl rating').lean();
+        console.log(`✅ [SOCKET] Trip ${tripId} atomically assigned to driver ${driverId}`);
+        console.log(`   - Status: driver_assigned`);
+
+        // ✅ STEP 3: Get customer data
+        const customer = await User.findById(trip.customerId)
+          .select('name phone photoUrl rating socketId')
+          .lean();
+
         if (!customer) {
-          await User.findByIdAndUpdate(driverId, { $set: { isBusy: false, currentTripId: null } });
-          await Trip.findByIdAndUpdate(tripId, { $unset: { assignedDriver: 1 }, $set: { status: 'requested', acceptedAt: null } });
-          emitTripError({ socket, tripId, message: 'Customer for this trip not found' });
+          console.error(`❌ Customer not found for trip ${tripId} - ROLLING BACK`);
+          
+          // ✅ CRITICAL: Rollback both driver and trip
+          await User.findByIdAndUpdate(driverId, {
+            $set: { 
+              isBusy: false, 
+              currentTripId: null,
+              canReceiveNewRequests: false
+            }
+          });
+          
+          await Trip.findByIdAndUpdate(tripId, {
+            $unset: { assignedDriver: 1 },
+            $set: { status: 'requested', acceptedAt: null }
+          });
+          
+          console.log(`✅ Rollback complete: driver + trip reset`);
+          
+          socket.emit('trip:accept_failed', { 
+            message: 'Customer not found', 
+            reason: 'customer_missing' 
+          });
           return;
         }
 
-        // Generate OTP
+        // ✅ STEP 4: Generate OTP
         const { generateOTP } = await import('../utils/otpGeneration.js');
         const rideCode = generateOTP();
-        await Trip.findByIdAndUpdate(tripId, { $set: { otp: rideCode } });
+        
+        await Trip.findByIdAndUpdate(tripId, { 
+          $set: { otp: rideCode } 
+        });
 
-        // Find customer socket
-        let customerSocketId = null;
-        const customerIdStr = trip.customerId.toString();
-        for (const [socketId, custId] of connectedCustomers.entries()) {
-          if (custId === customerIdStr) {
-            customerSocketId = socketId;
-            break;
+        console.log(`✅ OTP generated: ${rideCode}`);
+
+        // ✅ STEP 5: Find customer's socket
+        let customerSocketId = customer.socketId;
+        
+        if (!customerSocketId) {
+          const customerIdStr = trip.customerId.toString();
+          for (const [socketId, custId] of connectedCustomers.entries()) {
+            if (custId === customerIdStr) {
+              customerSocketId = socketId;
+              break;
+            }
           }
         }
 
-        // Emit to customer
+        // ✅ STEP 6: Notify customer
         if (customerSocketId) {
           const payloadToCustomer = {
             tripId: tripId.toString(),
@@ -502,6 +586,7 @@ export const initSocket = (ioInstance) => {
                 lng: trip.drop.coordinates[0],
                 address: trip.drop.address || "Drop Location",
               },
+              fare: trip.fare || 0
             },
             driver: {
               id: driver._id.toString(),
@@ -517,12 +602,17 @@ export const initSocket = (ioInstance) => {
               } : null,
             },
           };
+          
           io.to(customerSocketId).emit('trip:accepted', payloadToCustomer);
+          console.log(`✅ Customer notified via socket ${customerSocketId}`);
+        } else {
+          console.warn(`⚠️ Customer socket not found for ${customer.name}`);
         }
 
-        // Emit to driver
+        // ✅ STEP 7: Confirm to driver
         const payloadToDriver = {
           tripId: tripId.toString(),
+          rideCode,
           trip: {
             pickup: {
               lat: trip.pickup.coordinates[1],
@@ -534,6 +624,7 @@ export const initSocket = (ioInstance) => {
               lng: trip.drop.coordinates[0],
               address: trip.drop.address || "Drop Location",
             },
+            fare: trip.fare || 0
           },
           customer: {
             id: customer._id.toString(),
@@ -543,15 +634,19 @@ export const initSocket = (ioInstance) => {
             rating: customer.rating || 5.0,
           }
         };
+        
         socket.emit('trip:confirmed_for_driver', payloadToDriver);
+        console.log(`✅ Driver confirmed`);
 
-        // Notify other drivers
+        // ✅ STEP 8: Notify other drivers
         const otherDrivers = await User.find({
           isDriver: true,
           isOnline: true,
           _id: { $ne: driverId },
           socketId: { $exists: true, $ne: null }
         }).select('socketId').lean();
+
+        console.log(`📡 Notifying ${otherDrivers.length} other drivers`);
 
         otherDrivers.forEach(otherDriver => {
           if (otherDriver.socketId) {
@@ -562,20 +657,55 @@ export const initSocket = (ioInstance) => {
           }
         });
 
+        console.log('='.repeat(70));
+        console.log(`✅ [SOCKET] SUCCESS: Trip accepted by ${driver.name}`);
+        console.log('='.repeat(70));
+        console.log('');
+
       } catch (e) {
         console.error('❌ driver:accept_trip error:', e);
+        console.error(e.stack);
+        
+        // ✅ CRITICAL: Always rollback on error
         try {
           if (driverId) {
-            await User.findByIdAndUpdate(driverId, { $set: { isBusy: false, currentTripId: null } });
+            console.log(`🔄 Attempting emergency rollback for driver ${driverId}`);
+            
+            await User.findByIdAndUpdate(driverId, {
+              $set: { 
+                isBusy: false, 
+                currentTripId: null,
+                canReceiveNewRequests: false
+              }
+            });
+            
+            console.log(`✅ Emergency rollback: driver ${driverId} freed`);
+          }
+          
+          if (tripId) {
+            console.log(`🔄 Attempting emergency rollback for trip ${tripId}`);
+            
+            await Trip.findByIdAndUpdate(tripId, {
+              $unset: { assignedDriver: 1, otp: 1 },
+              $set: { status: 'requested', acceptedAt: null }
+            });
+            
+            console.log(`✅ Emergency rollback: trip ${tripId} reset`);
           }
         } catch (rollbackError) {
-          console.error('❌ Rollback failed:', rollbackError);
+          console.error('❌ Emergency rollback failed:', rollbackError);
+          console.error(rollbackError.stack);
         }
-        emitTripError({ socket, tripId, message: 'Failed to accept trip.' });
+        
+        socket.emit('trip:accept_failed', { 
+          message: 'Failed to accept trip. Please try again.', 
+          reason: 'server_error',
+          error: process.env.NODE_ENV === 'development' ? e.message : undefined
+        });
       }
     });
 
-    // DRIVER START RIDE (OTP verification)
+    // DRIVER START RIDE
     socket.on('driver:start_ride', async ({ tripId, driverId, otp, driverLat, driverLng }) => {
       try {
         const trip = await Trip.findById(tripId);
@@ -596,7 +726,6 @@ export const initSocket = (ioInstance) => {
 
         await Trip.findByIdAndUpdate(tripId, { $set: { status: 'ride_started', rideStartTime: new Date() } });
 
-        // Find customer socket
         const customerIdStr = trip.customerId.toString();
         let customerSocketId = null;
         for (const [socketId, custId] of connectedCustomers.entries()) {
@@ -624,95 +753,91 @@ export const initSocket = (ioInstance) => {
       }
     });
 
-    // DRIVER COMPLETE RIDE (keeps driver busy until cash collected)
-socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLng }) => {
-  try {
-    const trip = await Trip.findById(tripId);
-    if (!trip) {
-      socket.emit('trip:complete_error', { message: 'Trip not found' });
-      return;
-    }
+    // DRIVER COMPLETE RIDE
+   // Find and replace the driver:complete_ride handler in socketHandler.js
 
-    if (trip.status !== 'ride_started') {
-      socket.emit('trip:complete_error', { message: 'Ride has not started yet' });
-      return;
-    }
+    // ✅ UPDATED: DRIVER COMPLETE RIDE WITH DISCOUNT INFO
+    socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLng }) => {
+      try {
+        const trip = await Trip.findById(tripId);
+        if (!trip) {
+          socket.emit('trip:complete_error', { message: 'Trip not found' });
+          return;
+        }
 
-    const fare = trip.estimatedFare || trip.fare || 100;
+        if (trip.status !== 'ride_started') {
+          socket.emit('trip:complete_error', { message: 'Ride has not started yet' });
+          return;
+        }
 
-    await Trip.findByIdAndUpdate(tripId, {
-      $set: {
-        status: 'completed',
-        rideStatus: 'completed',
-        rideEndTime: new Date(),
-        finalFare: fare,
-        paymentCollected: false,
-        paymentCollectedAt: null
-      }
-    });
+        const fare = trip.fare || trip.estimatedFare || 100;
 
-    // 💰 AWARD INCENTIVES TO DRIVER (NEW)
-    try {
-      const incentiveResult = await awardIncentivesToDriver(driverId, tripId);
-      if (incentiveResult.awarded) {
-        console.log(`🎉 Driver earned: ₹${incentiveResult.cash} + ${incentiveResult.coins} coins`);
-        
-        // Notify driver of incentives earned
-        socket.emit('incentives:awarded', {
-          coins: incentiveResult.coins,
-          cash: incentiveResult.cash,
-          message: `You earned ₹${incentiveResult.cash} + ${incentiveResult.coins} coins!`,
-          newTotals: incentiveResult.newTotals,
-          timestamp: new Date().toISOString()
+        await Trip.findByIdAndUpdate(tripId, {
+          $set: {
+            status: 'completed',
+            rideStatus: 'completed',
+            rideEndTime: new Date(),
+            endTime: new Date(),
+            completedAt: new Date(),
+            finalFare: fare,
+            paymentCollected: false,
+            paymentCollectedAt: null
+          }
         });
+        
+        await User.findByIdAndUpdate(driverId, {
+          $set: {
+            currentTripId: tripId,
+            isBusy: true,
+            canReceiveNewRequests: false,
+            awaitingCashCollection: true,
+            lastTripCompletedAt: new Date()
+          }
+        });
+
+        const customerIdStr = trip.customerId.toString();
+        let customerSocketId = null;
+        for (const [socketId, custId] of connectedCustomers.entries()) {
+          if (custId === customerIdStr) {
+            customerSocketId = socketId;
+            break;
+          }
+        }
+
+        // ✅ UPDATED: Include discount info in completion payload
+        const rideCompletedPayload = {
+          tripId: tripId.toString(),
+          fare,
+          originalFare: trip.originalFare || null,
+          discountApplied: trip.discountApplied || 0,
+          coinsUsed: trip.coinsUsed || 0,
+          message: 'Ride completed',
+          timestamp: new Date().toISOString(),
+          awaitingPayment: true
+        };
+
+        if (customerSocketId) {
+          io.to(customerSocketId).emit('trip:completed', rideCompletedPayload);
+          console.log(`📢 Emitted trip:completed to customer with discount info`);
+        }
+
+        socket.emit('trip:completed', {
+          ...rideCompletedPayload,
+          message: 'Ride completed. Please collect ₹' + fare.toFixed(2) + ' from customer.',
+          awaitingCashCollection: true
+        });
+
+        console.log(`✅ Ride ${tripId} completed via socket`);
+        console.log(`   Fare: ₹${fare}`);
+        console.log(`   Original Fare: ₹${trip.originalFare || 'N/A'}`);
+        console.log(`   Discount: ₹${trip.discountApplied || 0}`);
+        console.log(`   Coins Used: ${trip.coinsUsed || 0}`);
+
+      } catch (e) {
+        console.error('❌ driver:complete_ride error:', e);
+        socket.emit('trip:complete_error', { message: 'Failed to complete ride: ' + e.message });
       }
-    } catch (incentiveError) {
-      console.error('⚠️ Failed to award incentives:', incentiveError);
-    }
-
-    await User.findByIdAndUpdate(driverId, {
-      $set: {
-        currentTripId: tripId,
-        isBusy: true,
-        canReceiveNewRequests: false,
-        awaitingCashCollection: true,
-        lastTripCompletedAt: new Date()
-      }
-    });
-
-    // Notify customer
-    const customerIdStr = trip.customerId.toString();
-    let customerSocketId = null;
-    for (const [socketId, custId] of connectedCustomers.entries()) {
-      if (custId === customerIdStr) {
-        customerSocketId = socketId;
-        break;
-      }
-    }
-
-    const rideCompletedPayload = {
-      tripId: tripId.toString(),
-      fare,
-      message: 'Ride completed',
-      timestamp: new Date().toISOString()
-    };
-
-    if (customerSocketId) {
-      io.to(customerSocketId).emit('trip:completed', rideCompletedPayload);
-    }
-
-    socket.emit('trip:completed', {
-      ...rideCompletedPayload,
-      message: 'Ride completed. Please collect ₹' + fare.toFixed(2) + ' from customer.',
-      awaitingCashCollection: true
-    });
-
-  } catch (e) {
-    console.error('❌ driver:complete_ride error:', e);
-    socket.emit('trip:complete_error', { message: 'Failed to complete ride: ' + e.message });
-  }
-});
-    // DRIVER GOING TO PICKUP
+    }); // DRIVER GOING TO PICKUP
     socket.on('driver:going_to_pickup', async ({ tripId, driverId }) => {
       try {
         await Trip.findByIdAndUpdate(tripId, { $set: { status: 'driver_going_to_pickup' } });
@@ -756,10 +881,65 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
       }
     });
 
-    // DRIVER LOCATION UPDATE (LIVE TRACKING)
-    socket.on('driver:location', async ({ tripId, latitude, longitude }) => {
+    // ✅ ENHANCED: DRIVER LOCATION UPDATE WITH SEQUENCE TRACKING
+socket.on('driver:location', async ({ tripId, driverId, latitude, longitude, sequence, timestamp }) => {
       try {
-        if (!tripId || !latitude || !longitude) return;
+        if (!tripId || !driverId || !latitude || !longitude) {
+          console.warn('⚠️ Missing required location data');
+          return;
+        }
+
+        // ✅ Get current driver state
+        const driver = await User.findById(driverId).select('locationSequence').lean();
+        if (!driver) {
+          console.warn(`⚠️ Driver not found: ${driverId}`);
+          return;
+        }
+
+        // ✅ ATOMIC UPDATE: Only if sequence is newer
+// âœ… ATOMIC UPDATE: Only if timestamp is newer
+const updateQuery = {
+  _id: driverId
+};
+
+if (timestamp) {
+  const clientTime = new Date(timestamp);
+  updateQuery.$or = [
+    { lastLocationUpdate: { $lt: clientTime } },
+    { lastLocationUpdate: { $exists: false } }
+  ];
+}
+        const updateData = {
+          $set: {
+            location: { 
+              type: 'Point', 
+              coordinates: [longitude, latitude] 
+            },
+            updatedAt: new Date()
+          }
+        };
+
+        if (typeof sequence === 'number') {
+          updateData.$set.locationSequence = sequence;
+        }
+        if (timestamp) {
+          updateData.$set.lastLocationUpdate = new Date(timestamp);
+        }
+
+        const result = await User.findOneAndUpdate(
+          updateQuery,
+          updateData,
+          { new: true, select: 'locationSequence lastLocationUpdate' }
+        );
+
+        // ❌ Out-of-order update - ignore
+     // âŒ Out-of-order update - ignore
+if (!result && timestamp) {
+  console.log(`âš ï¸ Ignored out-of-order location update for driver ${driverId} (timestamp ${timestamp})`);
+  return;
+}
+
+        // ✅ Calculate distance to destination
         const trip = await Trip.findById(tripId).lean();
         if (!trip) return;
 
@@ -768,12 +948,14 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
         const distance = calculateDistance(latitude, longitude, dropLat, dropLng);
         const distanceInMeters = distance * 1000;
 
+        // ✅ Update canReceiveNewRequests based on proximity
         if (distanceInMeters <= 500 && trip.status === 'ride_started') {
-          await User.findByIdAndUpdate(trip.assignedDriver, { $set: { canReceiveNewRequests: true } });
+          await User.findByIdAndUpdate(driverId, { $set: { canReceiveNewRequests: true } });
         } else {
-          await User.findByIdAndUpdate(trip.assignedDriver, { $set: { canReceiveNewRequests: false } });
+          await User.findByIdAndUpdate(driverId, { $set: { canReceiveNewRequests: false } });
         }
 
+        // ✅ Broadcast to customer
         const customerIdStr = trip.customerId.toString();
         let customerSocketId = null;
         for (const [socketId, custId] of connectedCustomers.entries()) {
@@ -786,15 +968,92 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
         if (customerSocketId) {
           io.to(customerSocketId).emit('driver:locationUpdate', {
             tripId: tripId.toString(),
+            driverId,
             latitude,
             longitude,
             distanceToDestination: Math.round(distanceInMeters),
-            timestamp: new Date().toISOString()
+            sequence: result?.locationSequence,
+            timestamp: result?.lastLocationUpdate || new Date().toISOString()
           });
         }
 
       } catch (e) {
         console.error('❌ driver:location error:', e);
+      }
+    });
+
+    // ✅ NEW: CUSTOMER LOCATION UPDATE WITH SEQUENCE TRACKING
+    socket.on('customer:location', async ({ tripId, customerId, latitude, longitude, sequence, timestamp }) => {
+      try {
+        if (!tripId || !customerId || !latitude || !longitude) {
+          console.warn('⚠️ Missing required location data');
+          return;
+        }
+
+        console.log(`📍 Customer ${customerId} location update (seq ${sequence || 'N/A'})`);
+
+        // ✅ ATOMIC UPDATE: Only if sequence is newer
+        const updateQuery = {
+          _id: customerId
+        };
+
+        if (typeof sequence === 'number') {
+          updateQuery.$or = [
+            { locationSequence: { $lt: sequence } },
+            { locationSequence: { $exists: false } }
+          ];
+        }
+
+        const updateData = {
+          $set: {
+            location: { 
+              type: 'Point', 
+              coordinates: [longitude, latitude] 
+            },
+            updatedAt: new Date()
+          }
+        };
+
+        if (typeof sequence === 'number') {
+          updateData.$set.locationSequence = sequence;
+        }
+        if (timestamp) {
+          updateData.$set.lastLocationUpdate = new Date(timestamp);
+        }
+
+        const result = await User.findOneAndUpdate(
+          updateQuery,
+          updateData,
+          { new: true, select: 'locationSequence lastLocationUpdate' }
+        );
+
+        // ❌ Out-of-order update - ignore
+        if (!result && typeof sequence === 'number') {
+          console.log(`⚠️ Ignored out-of-order location update for customer ${customerId} (seq ${sequence})`);
+          return;
+        }
+
+        console.log(`✅ Customer location updated (seq ${result?.locationSequence})`);
+
+        // ✅ Broadcast to driver
+        const trip = await Trip.findById(tripId).lean();
+        if (trip && trip.assignedDriver) {
+          const driver = await User.findById(trip.assignedDriver).select('socketId').lean();
+          if (driver?.socketId) {
+            io.to(driver.socketId).emit('customer:locationUpdate', {
+              tripId: tripId.toString(),
+              customerId,
+              latitude,
+              longitude,
+              sequence: result?.locationSequence,
+              timestamp: result?.lastLocationUpdate || new Date().toISOString()
+            });
+            console.log(`📡 Customer location sent to driver ${trip.assignedDriver}`);
+          }
+        }
+
+      } catch (e) {
+        console.error('❌ customer:location error:', e);
       }
     });
 
@@ -808,7 +1067,7 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
       }
     });
 
-    // CHAT: ROOM JOIN
+    // CHAT: JOIN
     socket.on('chat:join', (data) => {
       try {
         const { tripId, userId } = data;
@@ -821,7 +1080,7 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
       }
     });
 
-    // CHAT: LEAVE ROOM
+    // CHAT: LEAVE
     socket.on('chat:leave', (data) => {
       try {
         const { tripId, userId } = data;
@@ -834,7 +1093,7 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
       }
     });
 
-    // CHAT: SEND MESSAGE (single, saved + room + direct fallback)
+    // CHAT: SEND MESSAGE
     socket.on('chat:send_message', async (data) => {
       try {
         const { tripId, fromId, toId, message, timestamp } = data;
@@ -843,7 +1102,6 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
           return;
         }
 
-        // Save to DB (best-effort)
         try {
           const chatMessage = new ChatMessage({
             tripId,
@@ -872,7 +1130,6 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
         socket.to(roomName).emit('chat:new_message', messageData);
         socket.emit('chat:message_sent', { success: true, timestamp: messageData.timestamp });
 
-        // Direct fallback delivery
         let recipientSocketId = null;
         for (const [socketId, userId] of connectedCustomers.entries()) {
           if (userId === toId) { recipientSocketId = socketId; break; }
@@ -911,7 +1168,7 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
       try {
         const { tripId, userId } = data;
         if (!tripId || !userId) return;
-        const result = await ChatMessage.updateMany({ tripId, receiverId: userId, read: false }, { $set: { read: true } });
+        await ChatMessage.updateMany({ tripId, receiverId: userId, read: false }, { $set: { read: true } });
         const roomName = `chat_${tripId}`;
         socket.to(roomName).emit('chat:messages_read', { userId, tripId, timestamp: new Date().toISOString() });
       } catch (error) {
@@ -931,7 +1188,7 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
       }
     });
 
-    // DRIVER MANUAL GO OFFLINE
+    // DRIVER GO OFFLINE
     socket.on('driver:go_offline', async ({ driverId }) => {
       try {
         const driver = await User.findById(driverId).select('currentTripId isBusy name').lean();
@@ -977,21 +1234,27 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
           }
 
           if (hasRealActiveTrip) {
-            await User.findByIdAndUpdate(driverId, { $set: { socketId: null, lastDisconnectedAt: new Date() } });
-          } else {
-            await User.findByIdAndUpdate(driverId, {
-              $set: {
-                isOnline: false,
-                isBusy: false,
-                socketId: null,
-                currentTripId: null,
-                canReceiveNewRequests: false,
-                awaitingCashCollection: false,
-                lastDisconnectedAt: new Date()
-              }
-            }, { new: true });
-
-            // verification step (best-effort)
+  await User.findByIdAndUpdate(driverId, { 
+    $set: { 
+      socketId: null, 
+      lastDisconnectedAt: new Date() 
+    } 
+  });
+} else {
+  await User.findByIdAndUpdate(driverId, {
+    $set: {
+      isOnline: false,
+      isBusy: false,
+      socketId: null,
+      currentTripId: null,
+      canReceiveNewRequests: false,
+      awaitingCashCollection: false,
+      lastDisconnectedAt: new Date()
+    },
+    $unset: {
+      lastLocationUpdate: "" // ✅ ADD THIS - Clear stale location timestamp
+    }
+  }, { new: true });
             const verify = await User.findById(driverId).select('isBusy currentTripId awaitingCashCollection').lean();
             if (verify && (verify.isBusy || verify.currentTripId || verify.awaitingCashCollection)) {
               await User.updateOne({ _id: driverId }, { $set: { isBusy: false, currentTripId: null, awaitingCashCollection: false, isOnline: false } });
@@ -1010,32 +1273,147 @@ socket.on('driver:complete_ride', async ({ tripId, driverId, driverLat, driverLn
         console.error('❌ disconnect cleanup error:', e);
       }
     });
+    // TRIP RETRY REQUEST
+socket.on('trip:rerequest', async ({ tripId, customerId, vehicleType, retryAttempt }) => {
+  try {
+    console.log('');
+    console.log('🔄 ═══════════════════════════════════════════════');
+    console.log(`🔄 RETRY REQUEST #${retryAttempt}`);
+    console.log(`   Trip ID: ${tripId}`);
+    console.log('🔄 ═══════════════════════════════════════════════');
 
-    // AUTO-CLEANUP EXPIRED TRIP REQUESTS
-    setInterval(async () => {
-      try {
-        const now = new Date();
-        const expiredTrips = await Trip.find({ status: 'requested', expiresAt: { $lt: now } });
-        if (!expiredTrips.length) return;
-        for (const trip of expiredTrips) {
-          await Trip.findByIdAndUpdate(trip._id, { $set: { status: 'timeout' } });
-          const customer = await User.findById(trip.customerId).select('socketId').lean();
-          if (customer?.socketId) {
-            io.to(customer.socketId).emit('trip:timeout', { tripId: trip._id.toString(), message: 'No drivers available right now. Please try again.', reason: 'timeout' });
-          }
-          const onlineDrivers = await User.find({ isDriver: true, isOnline: true, socketId: { $exists: true, $ne: null } }).select('socketId').lean();
-          onlineDrivers.forEach(driver => {
-            if (driver.socketId) {
-              io.to(driver.socketId).emit('trip:expired', { tripId: trip._id.toString(), message: 'This request has expired' });
-            }
+    if (!tripId) return;
+
+    const trip = await Trip.findById(tripId).lean();
+    
+    if (!trip) {
+      socket.emit('trip:rerequest_failed', {
+        message: 'Trip not found',
+        shouldCancelSearch: true
+      });
+      return;
+    }
+
+    if (trip.status !== 'requested') {
+      console.log(`ℹ️ Trip already ${trip.status} - no retry needed`);
+      return;
+    }
+
+    const nearbyDrivers = await User.find({
+      isDriver: true,
+      vehicleType: vehicleType,
+      isOnline: true,
+      isBusy: { $ne: true },
+      $or: [
+        { currentTripId: null },
+        { currentTripId: { $exists: false } }
+      ],
+      location: {
+        $near: {
+          $geometry: { 
+            type: 'Point', 
+            coordinates: trip.pickup.coordinates 
+          },
+          $maxDistance: DISTANCE_LIMITS.short || 5000,
+        },
+      },
+    })
+    .select('name phone vehicleType location isOnline socketId fcmToken')
+    .lean();
+
+    console.log(`🔍 Found ${nearbyDrivers.length} available drivers for retry`);
+
+    if (nearbyDrivers.length === 0) return;
+
+    const payload = {
+      tripId: trip._id.toString(),
+      type: trip.type,
+      vehicleType: vehicleType,
+      customerId: customerId,
+      pickup: {
+        lat: trip.pickup.coordinates[1],
+        lng: trip.pickup.coordinates[0],
+        address: trip.pickup.address || "Pickup Location",
+      },
+      drop: {
+        lat: trip.drop.coordinates[1],
+        lng: trip.drop.coordinates[0],
+        address: trip.drop.address || "Drop Location",
+      },
+      fare: trip.fare || 0,
+      retryAttempt: retryAttempt,
+      isRetry: true
+    };
+
+    broadcastToDrivers(nearbyDrivers, payload);
+
+    console.log(`✅ Retry #${retryAttempt} broadcasted to ${nearbyDrivers.length} drivers`);
+    console.log('');
+
+  } catch (e) {
+    console.error('❌ trip:rerequest error:', e);
+  }
+});
+
+    // AUTO-CLEANUP EXPIRED TRIPS
+  // AUTO-CLEANUP EXPIRED TRIPS - 60 second timeout
+setInterval(async () => {
+  try {
+    const now = new Date();
+    
+    // Find trips older than 60 seconds
+    const expiredTrips = await Trip.find({
+      status: 'requested',
+      createdAt: { $lt: new Date(now.getTime() - TRIP_TIMEOUT_MS) }
+    });
+
+    if (!expiredTrips.length) return;
+
+    console.log(`🧹 Found ${expiredTrips.length} expired trips (>60s old)`);
+
+    for (const trip of expiredTrips) {
+      const tripAge = Math.round((now - trip.createdAt) / 1000);
+      console.log(`   ⏰ Trip ${trip._id}: ${tripAge}s old - timing out`);
+
+      await Trip.findByIdAndUpdate(trip._id, { 
+        $set: { 
+          status: 'timeout',
+          timeoutAt: new Date(),
+          timeoutReason: 'No driver accepted within 60 seconds'
+        } 
+      });
+
+      const customer = await User.findById(trip.customerId).select('socketId').lean();
+      if (customer?.socketId) {
+        io.to(customer.socketId).emit('trip:timeout', {
+          tripId: trip._id.toString(),
+          message: 'No drivers available right now. Please try again.',
+          reason: 'timeout',
+          duration: tripAge
+        });
+      }
+
+      const onlineDrivers = await User.find({
+        isDriver: true,
+        isOnline: true,
+        socketId: { $exists: true, $ne: null }
+      }).select('socketId').lean();
+
+      onlineDrivers.forEach(driver => {
+        if (driver.socketId) {
+          io.to(driver.socketId).emit('trip:expired', {
+            tripId: trip._id.toString(),
+            message: 'This request has expired'
           });
         }
-      } catch (e) {
-        console.error('❌ Cleanup job error:', e);
-      }
-    }, 5000); // every 5s
+      });
+    }
+  } catch (e) {
+    console.error('❌ Cleanup job error:', e);
+  }
+}, 10000); // Check every 10 seconds
 
-    console.log('⏰ Trip cleanup job started (checks every 5 seconds)');
+    console.log('⏰ Trip cleanup job started');
     startNotificationRetryJob();
     startStaleTripCleanup();
     console.log('🚀 Socket.IO initialized');

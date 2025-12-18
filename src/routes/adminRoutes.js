@@ -1,5 +1,7 @@
 import express from "express";
 import { verifyAdminToken } from "../middlewares/adminAuth.js";
+import { protect } from "../middlewares/authMiddleware.js"; // 🔑 USER AUTH (driver/customer)
+
 import {
   // Dashboard
   getDashboardStats,
@@ -31,80 +33,106 @@ import {
   markNotificationAsRead,
   markAllNotificationsAsRead,
   deleteNotification,
-  
+
   // Fare Rates
   getAllFareRates,
   updateFareRate,
   createFareRate,
   deleteFareRate,
-  
+
   // Documents
   getDriverDocuments,
   verifyDriverDocument,
   getPendingDocuments,
   getDocumentById,
-  
-  // 🧪 TEST - Add this import
+  deleteDriverDocumentImage,
+
+  // 🧪 TEST
   testImageAccess,
 } from "../controllers/adminController.js";
 
 const router = express.Router();
 
 // =====================================================
-// 🧪 TEST ENDPOINTS (Add these at the top for easy access)
+// 🧪 TEST ENDPOINTS
 // =====================================================
-// Without auth for quick testing:
 router.get("/test-images", testImageAccess);
-// Or with auth:
-// router.get("/test-images", verifyAdminToken, testImageAccess);
 
 // =====================================================
-// EXISTING ROUTES
+// 🟡 ADMIN AUTH
 // =====================================================
+router.post("/login", adminLogin);
 
-// Fare Rates
+// =====================================================
+// 🟢 DASHBOARD
+// =====================================================
+router.get("/stats", verifyAdminToken, getDashboardStats);
+
+// =====================================================
+// 💰 FARE RATES
+// =====================================================
 router.get("/fare/rates", verifyAdminToken, getAllFareRates);
 router.put("/fare/update/:id", verifyAdminToken, updateFareRate);
 router.post("/fare/create", verifyAdminToken, createFareRate);
 router.delete("/fare/delete/:id", verifyAdminToken, deleteFareRate);
 
-// 🟡 Admin Login (Public)
-router.post("/login", adminLogin);
-
-// 🟢 Dashboard Stats
-router.get("/stats", verifyAdminToken, getDashboardStats);
-
-// 🧑 Customers
+// =====================================================
+// 🧑 CUSTOMERS
+// =====================================================
 router.get("/customers", verifyAdminToken, getAllCustomers);
 router.put("/customer/block/:customerId", verifyAdminToken, blockCustomer);
 router.put("/customer/unblock/:customerId", verifyAdminToken, unblockCustomer);
 
-// 🚖 Drivers
+// =====================================================
+// 🚖 DRIVERS
+// =====================================================
 router.get("/drivers", verifyAdminToken, getAllDrivers);
 router.put("/driver/block/:driverId", verifyAdminToken, blockDriver);
 router.put("/driver/unblock/:driverId", verifyAdminToken, unblockDriver);
 
-// 🚘 Trips
+// =====================================================
+// 🚘 TRIPS
+// =====================================================
 router.get("/trips", verifyAdminToken, getAllTrips);
 router.post("/manual-assign", verifyAdminToken, manualAssignDriver);
 router.get("/trip/:tripId", verifyAdminToken, getTripDetails);
 router.put("/trip/:tripId/complete", verifyAdminToken, markTripCompleted);
 router.put("/trip/:tripId/cancel", verifyAdminToken, cancelTrip);
 
-// 📨 Push Notifications
+// =====================================================
+// 📨 PUSH NOTIFICATIONS (ADMIN)
+// =====================================================
 router.post("/send-fcm", verifyAdminToken, sendPushToUsers);
 router.post("/send-fcm/individual", verifyAdminToken, sendPushToIndividual);
 
-// 🔔 Notifications
-router.get("/notifications/user/:userId", getUserNotifications);
-router.put("/notifications/:notificationId/read", markNotificationAsRead);
-router.put("/notifications/user/:userId/read-all", markAllNotificationsAsRead);
-router.delete("/notifications/:notificationId", deleteNotification);
+// =====================================================
+// 🔔 USER NOTIFICATIONS (DRIVER & CUSTOMER - Protected)
+// =====================================================
+// ✅ Fetch notifications for logged-in user (driver/customer)
+router.get("/notifications/user", protect, getUserNotifications);
 
-// 📄 Documents
+// ✅ Mark single notification as read
+router.put("/notifications/:notificationId/read", protect, markNotificationAsRead);
+
+// ✅ Mark all notifications as read
+router.put("/notifications/user/read-all", protect, markAllNotificationsAsRead);
+
+// ✅ Delete notification
+router.delete("/notifications/:notificationId", protect, deleteNotification);
+
+// =====================================================
+// 🔔 ADMIN NOTIFICATIONS (By User ID - Admin Access)
+// =====================================================
+router.get("/notifications/user/:userId", verifyAdminToken, getUserNotifications);
+router.put("/notifications/user/:userId/read-all", verifyAdminToken, markAllNotificationsAsRead);
+
+// =====================================================
+// 📄 DOCUMENTS
+// =====================================================
 router.get("/documents/pending", verifyAdminToken, getPendingDocuments);
 router.get("/documents/:driverId", verifyAdminToken, getDriverDocuments);
 router.get("/document/:docId", verifyAdminToken, getDocumentById);
 router.put("/verifyDocument/:docId", verifyAdminToken, verifyDriverDocument);
+router.delete("/document/:docId/image", verifyAdminToken, deleteDriverDocumentImage);
 
 export default router;

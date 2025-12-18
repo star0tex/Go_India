@@ -1,7 +1,7 @@
 // src/controllers/parcelController.js
 import asyncHandler from 'express-async-handler';
 import Rate from '../models/Rate.js';
-import Parcel from '../models/Parcel.js';
+import Parcel from '../models/parcel.js';
 import { calcFare } from '../utils/fareCalc.js';
 
 /**

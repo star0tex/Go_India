@@ -1,4 +1,4 @@
 // utils/otpGenerator.js
 export const generateOTP = () => {
-  return Math.floor(1000 + Math.random() * 9000).toString();
+  return  Math.floor(Math.random() * 10000).toString().padStart(4, "0");
 };
